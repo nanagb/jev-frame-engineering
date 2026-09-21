@@ -1,0 +1,108 @@
+# Evaluation protocol
+
+Use this procedure to test changes to a request and the decisions consuming its answers.
+Repeated requests measure run-to-run variation; they do not establish population accuracy.
+
+## 1. Build labelled sets
+
+Items are JSONL:
+
+```json
+{"id": "ticket-1", "state": {"message": "..."}, "expected": {"queue": "billing", "urgent": true}}
+```
+
+Expected values are option names for Choice, JSON booleans for Noul, and zero-based rubric
+positions for Score. Partial labels are allowed. Score predictions can fall between levels.
+
+Split before tuning, keeping related records and near duplicates in the same split. Use dev for
+wording, validation for model/threshold selection, and an untouched test set for final reporting.
+If validation misses influence wording, validation has become development data. A two-way split
+is sufficient only if the final set stays untouched until decisions are fixed.
+
+Review label quality against the task definition and available evidence. Represent ambiguity
+explicitly (adjudication, acceptable labels, or a separate slice); this basic scorer accepts one
+label per item, so document that limitation. Do not automatically relabel disagreement as `other`
+or remove difficult items. Avoid evaluation examples copied or closely paraphrased into criteria.
+Choose sample size from the required error bound and class coverage, not a universal item count.
+
+## 2. Check repeatability
+
+```sh
+python3 scripts/eval.py --questions Q.json --items val.jsonl --repeat 3
+```
+
+The report compares each later run with run 1. Identical outputs show repeatability on those
+inputs; a small count difference on a finite set can still reflect sampling uncertainty.
+Use paired item comparisons and suitable uncertainty estimates when deciding whether a variant
+improves accuracy. Repeating a systematic error need not fix it; evaluate any voting strategy
+instead of assuming it helps or cannot help. On a synthetic fixture, five repeats of 50 items
+never changed a label; probabilities moved by up to 0.08, enough to cross a threshold.
+
+## 3. Isolate changes
+
+Compare state, questions, criteria, model, reference form, batch size, position, and composition.
+For batch tuning, compare the single request to the batch template at size one first. Hold
+positions constant or rotate them. Inspect neighbouring labels as one possible clue to errors.
+
+`--permute-options` reverses Choice options in single mode and reports label flips and threshold
+crossings. It tests order sensitivity without asserting the cause. It does not permute Score
+levels, since their order defines the scale. Use the production option order for calibration.
+
+## 4. Read the metrics and their denominators
+
+`eval.py` reports:
+
+- **Choice:** fine and optional coarse accuracy; accepted/correct counts at the policy threshold;
+  mean confidence; per-bucket and cumulative accuracy/coverage; batch position quarters.
+- **Noul:** caught positives, false positives, class counts, lowest true and highest false outputs.
+  Derive recall as caught/positives and precision as caught/(caught + false positives), when those
+  denominators are nonzero. These are threshold metrics, not a complete calibration analysis.
+- **Score:** mean absolute error and predictions within half a rubric level.
+- **Failures:** items without answers. Accuracy and buckets condition on successful, labelled
+  answers; include failure rate when reporting end-to-end coverage.
+
+The scorer does not apply a production policy, compute calibration curves/confidence intervals,
+or implement review. Coarse accuracy maps all labels to parents; it does not establish the
+correctness of a fine-above-threshold/coarse-below-threshold policy.
+
+Token estimates use reported usage, excluding unreported usage of failed/retried attempts.
+Request counts include failed logical evaluations, not individual retry attempts.
+`ms/item` is amortized elapsed time for successful evaluations, including their retries, not a batched item's response latency or
+end-to-end pipeline latency. Prices are estimates for the known resolved model only.
+
+## 5. Choose and validate thresholds
+
+`policy.json` example (illustrative thresholds, not recommendations):
+
+```json
+{"queue": {"threshold": 0.75, "parents": {"billing": "money", "sales": "money"}}}
+```
+
+Under perfect review, zero cost for a correct action, constant error cost `C_wrong > 0`, and
+review cost `C_review`, act when `(1-p_correct) * C_wrong <= C_review`. For a $3 review and a $40
+error, the break-even correctness probability is 0.925. With asymmetric errors, imperfect
+review, or different utilities, use the appropriate expected-loss calculation instead.
+
+The bucket table helps propose a confidence cutoff; it does not convert confidence into
+correctness probability. Check cumulative sample counts and uncertainty for the selected region,
+including the action/class being automated. The built-in table aggregates Choice labels; a
+single overall threshold is insufficient evidence for action-specific error costs. Select using
+tuning data and validate once on untouched data. If evidence is insufficient, gather more or
+retain review. No fixed minimum bucket count proves a target precision.
+
+Consume returned `confidence`; the [confidence docs](https://docs.typesafe.ai/confidence) do not
+publish an exact formula. Options and request changes can affect the output. Measure calibration
+and operating precision on representative traffic, including class prevalence.
+
+## 6. Re-evaluate when inputs change
+
+Recheck after question, criteria, state construction, model, batching, population, or policy-cost
+changes. Log resolved model versions and avoid combining versions into one accuracy claim.
+Preserve raw results and dataset versions so a later reviewer can reproduce the comparison.
+
+## Input files
+
+- **Items** (`--items`): JSONL as in section 1. `id` defaults to the line number and `expected` to `{}`.
+- **Questions** (`--questions`): `{"model": "jev-1.13.0", "questions": {<id>: {"type": "choice" | "noul" | "score", "instructions": ..., "criteria": ...}}}`. A bare question map is also accepted, and `model` defaults to `jevlib.DEFAULT_MODEL`. Question bodies follow the TypeSafe API; `ablate.py` removes the descriptive fields `not_for`, `examples`, `notes`, and `inspect` where present.
+- **Batch template** (`--batch-template`): `{"array_field", "item_value"?, "shared_state"?, "reference"?, "questions", "model"?}`. Each request places up to N item values (the whole `state`, or `state[item_value]`) under `array_field` on top of `shared_state`, and `{ref}` in each question expands per item. `reference` is `keyed` (default: an object keyed `item000`.., ref `<array_field>.item017`), `quoted` (plain array, ref `<array_field>[17]`, with the item's JSON value appended to the question), or `index` (plain array, no quoting).
+- **Policy** (`--policy`): section 5. Thresholds default to 0.75 for Choice and 0.8 for Noul when omitted.
