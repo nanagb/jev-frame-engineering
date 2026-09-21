@@ -6,6 +6,121 @@
 of the evidence, questions, and answer boundaries that shape a model's judgments. This repository
 applies that practice to existing integrations with TypeSafe's System One models (Jev).
 
+[Understand the practice](#understanding-frame-engineering) · [Use the skill](#the-skill) · [Install](#install)
+
+## Understanding Frame Engineering
+
+Here, Frame Engineering names the practice of designing the whole decision: what the model
+sees, what it judges, and how the application acts on the result. Its central concern is whether
+the model is judging the right thing from the right evidence. A confident answer to an ambiguous
+question can still produce the wrong business outcome.
+
+### A frame defines the decision
+
+A decision frame connects four parts:
+
+| Part | What it establishes | Example |
+|---|---|---|
+| Evidence and context | The facts and policies available to the model | A customer message and the definitions of the support queues |
+| Question | The specific judgment and its subject | Which queue fits this customer's reported problem? |
+| Answer boundaries | What answers mean and which distinctions matter | Billing, technical support, account access, or another issue |
+| Application policy | How a judgment becomes an action | Route automatically only when the routing policy permits it; otherwise send for review |
+
+In Jev, evidence and contextual policies belong in `state`; question `instructions` specify what
+to judge. All questions in a request see the same state and are evaluated independently. If one
+decision needs the result of another, the application must arrange that dependency explicitly.
+See TypeSafe's [state model](https://docs.typesafe.ai/concepts/state).
+
+The answer type is a design choice too. **Noul** represents a yes/no judgment as a probability;
+**Choice** selects among alternatives; **Score** places a judgment on an ordered rubric. Use
+separate questions for independent properties, and a Choice when the task requires selecting
+one alternative. A Score needs meaningful levels, such as observable degrees of service impact,
+so that different readers can understand what a higher value means.
+See the [Noul](https://docs.typesafe.ai/primitives/noul),
+[Choice](https://docs.typesafe.ai/primitives/choice), and
+[Score](https://docs.typesafe.ai/primitives/score) definitions.
+
+### One message can support different judgments
+
+Consider this fictional support message:
+
+> I was charged twice, but I only need a corrected invoice by Friday.
+
+“Handle this ticket” leaves several decisions mixed together: identifying the problem,
+interpreting the request, checking eligibility, and choosing an action. A clearer frame separates
+those decisions:
+
+| Question | Answer shape | Expected reading of this example |
+|---|---|---|
+| Which support queue fits the problem reported in this message? | Choice with defined queue options | Billing |
+| Does the customer explicitly request a refund in this message? | Noul with criteria for an explicit refund request | No |
+
+These are illustrative labels, not measured model outputs. They are compatible: a billing
+problem does not imply a refund request. Likewise, “no refund requested” says nothing about
+refund eligibility. That requires different evidence and a different decision.
+
+This distinction also changes what belongs in the frame. Queue definitions help routing;
+transaction records may help establish what happened. Unrelated account history may add cost
+and distraction. The application should verify amounts, dates, permissions, and eligibility
+rules in code wherever those checks are deterministic. A model's interpretation of the message
+does not authorize moving money.
+
+### Context and batching shape the evidence
+
+More context is useful when it supplies missing evidence or resolves a relevant ambiguity.
+More wording is useful when it clarifies a distinction. Neither is inherently an improvement:
+extra examples can narrow a category unintentionally, and overlapping options can make the
+intended answer unclear even to a human reviewer.
+
+Batching introduces another design concern. A question must identify its own item explicitly
+when several tickets share a state. Clear references, shared definitions, batch composition,
+and item position all deserve evaluation because the model now sees neighbouring content too.
+Independent questions are not a guarantee that unrelated content cannot influence an answer.
+
+Keep customer content distinguishable from application policy, and test messages that try to
+steer the judgment. Field names and delimiters help describe the boundary; they do not enforce
+it. TypeSafe documents [adversarial content](https://docs.typesafe.ai/model-jaggedness/jev-1.13)
+as a model limitation. Authorization and allowed actions remain application responsibilities.
+
+### Confidence, missing categories, and failures are different
+
+Three situations require different handling:
+
+| Situation | Meaning | Application consequence |
+|---|---|---|
+| No listed category fits | The available alternatives do not cover the item | An explicit no-match option can represent this legitimate outcome |
+| The returned judgment is uncertain | The model does not strongly favour an answer | A validated policy may defer the item for review |
+| The request fails or returns no usable answer | No judgment is available | Preserve a failure state and apply retry or recovery policy |
+
+An `other` category is not automatically an uncertainty signal, and a failed request is not a
+negative answer. For Noul, a probability near 0.5 expresses uncertainty between yes and no;
+it does not mean “moderately true.” For Choice and Score, returned confidence describes the
+concentration of the answer distribution. It is not proof of correctness. Thresholds need
+validation against the errors and consequences of the actual task, as explained in TypeSafe's
+[confidence guidance](https://docs.typesafe.ai/confidence).
+
+### What makes this engineering
+
+A frame is a testable design. A clear task definition and representative labelled examples make
+its quality assessable, including difficult cases and cases where the right outcome is review.
+Disagreement between human reviewers can reveal an unclear definition before any model tuning
+begins.
+
+Controlled comparisons reveal which changes help. Adding policy context might reduce one kind
+of error while introducing another. Changing a decisive fact should change the answer when the
+task demands it; irrelevant wording or a different batch position should preserve the intended
+judgment. Repeating the same mistake consistently demonstrates repeatability, not correctness.
+
+Improvement therefore depends on outcomes: correct decisions, errors by category, how much work
+can be handled automatically, unanswered requests, cost, and latency. More confident outputs
+alone do not establish improvement. An untouched final evaluation set helps distinguish gains
+that generalize from adjustments that merely fit familiar examples. A change in model, input
+population, or application policy can invalidate earlier evidence and calls for re-evaluation.
+
+For practical work, use the [evaluation protocol](skills/jev-frame-engineering/references/eval-protocol.md),
+[batching guide](skills/jev-frame-engineering/references/batching.md), and
+[production contract](skills/jev-frame-engineering/references/production-contract.md).
+
 ## The skill
 
 [`jev-frame-engineering`](skills/jev-frame-engineering/SKILL.md) covers state and question design,
