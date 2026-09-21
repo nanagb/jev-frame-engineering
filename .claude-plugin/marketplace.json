@@ -1,0 +1,15 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "blue-terra",
+  "description": "Agent skills from Blue Terra LLC.",
+  "owner": {
+    "name": "Blue Terra LLC"
+  },
+  "plugins": [
+    {
+      "name": "jev-frame-engineering",
+      "description": "Frame Engineering for Jev: design, test, and refine the evidence, questions, and answer boundaries in an existing TypeSafe integration.",
+      "source": "./"
+    }
+  ]
+}

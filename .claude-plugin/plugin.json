@@ -1,0 +1,19 @@
+{
+  "name": "jev-frame-engineering",
+  "version": "0.9.3",
+  "description": "Frame Engineering for Jev: design, test, and refine the evidence, questions, and answer boundaries in an existing TypeSafe integration. Covers decision framing, question ablations, batch references, token costs, calibrated action thresholds, and production behavior.",
+  "author": {
+    "name": "Blue Terra LLC"
+  },
+  "homepage": "https://github.com/nanagb/jev-frame-engineering#readme",
+  "repository": "https://github.com/nanagb/jev-frame-engineering",
+  "license": "MIT",
+  "keywords": [
+    "typesafe",
+    "jev",
+    "system-one",
+    "frame-engineering",
+    "evaluation",
+    "calibration"
+  ]
+}
