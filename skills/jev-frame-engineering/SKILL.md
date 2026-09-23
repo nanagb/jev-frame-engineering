@@ -7,7 +7,7 @@ description: >
   and supporting production behavior. Use TypeSafe's official typesafe-ai skill or
   live documentation for the programming model and initial integration.
 metadata:
-  version: 0.9.3
+  version: 0.9.4
 ---
 
 # Frame Engineering for Jev
