@@ -3,7 +3,7 @@ import copy
 import io
 import json
 import os
-import sys
+import re
 import tempfile
 import unittest
 import urllib.error
@@ -12,8 +12,11 @@ from email.message import Message
 from email.utils import formatdate
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "jev-frame-engineering", "scripts")))
-import ablate  # noqa: E402  (scripts dir added above)
+try:
+    from . import scripts_path  # noqa: F401  (package run: python3 -m unittest tests.test_jevlib)
+except ImportError:
+    import scripts_path  # noqa: F401  (discover -s tests, or python3 tests/test_jevlib.py)
+import ablate
 import eval as ev
 import jevlib as J
 import sweep_batch

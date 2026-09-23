@@ -8,10 +8,12 @@ mutated, a nested question set round-trips) and report_permutation (flips, thres
 mean |Δconf| counted from synthetic answer pairs; the policy threshold is the one used; items
 missing an answer are skipped; Nouls are not reported).
 """
-import io, json, os, sys, unittest
+import io, json, os, unittest
 from contextlib import redirect_stdout
-SCRIPTS = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "jev-frame-engineering", "scripts"))
-sys.path.insert(0, SCRIPTS)
+try:
+    from .scripts_path import SCRIPTS   # package run: python3 -m unittest tests.test_eval
+except ImportError:
+    from scripts_path import SCRIPTS    # discover -s tests, or python3 tests/test_eval.py
 import eval as ev  # the script, imported as a module (its main() only runs under __main__)
 
 QSET = {"questions": {
