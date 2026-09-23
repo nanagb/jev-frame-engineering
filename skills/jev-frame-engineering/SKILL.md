@@ -58,6 +58,8 @@ See [evaluation protocol](references/eval-protocol.md) for formats, metrics, and
 - Plain strings are a valid starting point. Structured `what`, `not_for`, `examples`, `notes`, and
   `inspect` fields are descriptive content, not API operators. Keep additions that improve the
   target behavior on representative data; examples and exclusions are not inherently harmful.
+  Draw `examples` from a labelled pool disjoint from every evaluation set, and keep a paraphrase
+  on the same side as its source: on the fixture a paraphrase pulled as hard as the literal string.
 - Add `other`/`none` when a Choice's options may not cover the input. Noul criteria are optional;
   explicit `true` and `false` descriptions can clarify boundaries. Add a presence Noul only when
   that is a useful separate judgment.

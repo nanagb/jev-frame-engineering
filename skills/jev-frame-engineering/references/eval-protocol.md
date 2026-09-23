@@ -25,11 +25,16 @@ wording, validation for model/threshold selection, and an untouched test set for
 If validation misses influence wording, validation has become development data. A two-way split
 is sufficient only if the final set stays untouched until decisions are fixed.
 
+Criteria `examples` come from a fourth, labelled pool that is disjoint from dev, validation and
+test. Keep a paraphrase on the same side of the line as its source: on the fixture a
+paraphrased example pulled an ambiguous item as hard as the literal string, so an example that
+resembles a test item leaks by meaning, not only by text.
+
 Review label quality against the task definition and available evidence. Represent ambiguity
 explicitly (adjudication, acceptable labels, or a separate slice); this basic scorer accepts one
 label per item, so document that limitation. Do not automatically relabel disagreement as `other`
-or remove difficult items. Avoid evaluation examples copied or closely paraphrased into criteria.
-Choose sample size from the required error bound and class coverage, not a universal item count.
+or remove difficult items. Choose sample size from the required error bound and class coverage,
+not a universal item count.
 
 ## 2. Check repeatability
 
