@@ -6,7 +6,7 @@
 of the evidence, questions, and answer boundaries that shape a model's judgments. This repository
 applies that practice to existing integrations with TypeSafe's System One models (Jev).
 
-[Understand the practice](#understanding-frame-engineering) · [Use the skill](#the-skill) · [Install](#install)
+[Understand the practice](#understanding-frame-engineering) · [The skill](#the-skill) · [Install](#install) · [Use it](#use-the-skill) · [Run the scripts](#run-the-scripts-directly)
 
 ## Understanding Frame Engineering
 
@@ -163,6 +163,98 @@ ln -s "$PWD/skills/jev-frame-engineering" ~/.codex/skills/jev-frame-engineering
 ```
 
 A copy works too; a symlink keeps the installed skill and repository in step.
+
+### Use the skill
+
+The skill is model-invoked. Claude Code reads every installed skill's name and description at
+startup and loads the body when a request matches, so there is nothing to run; start a new
+session after installing so the skill is discovered.
+
+Requests that should load it:
+
+- “Split this Jev request into separate questions and say what each one judges.”
+- “Does adding `examples` to the `queue` criteria help? Ablate it against my labelled set.”
+- “Routing is fine at 8 tickets per request and poor at 32 — what should I test?”
+- “Choose an auto-routing threshold given a $3 review and a $40 wrong route.”
+
+To load it deliberately, name it: in Claude Code type `/jev-frame-engineering:jev-frame-engineering`
+after a plugin install (plugin skills are namespaced `plugin:skill`) or `/jev-frame-engineering`
+after a symlink install, or write “use the jev-frame-engineering skill” in the request.
+
+Have ready: a TypeSafe integration that already returns answers, the question set and state it
+sends, labelled items for the decisions in question, and a credential for the scripts. The skill
+works on an existing frame; for the programming model and a first integration, use
+[TypeSafe's official skill](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai).
+
+A session usually runs in this order: state the decision and what acting on it costs; separate
+the judgments and choose an answer type for each; assemble labelled development and validation
+sets and take a baseline with `eval.py`; change one axis at a time (`ablate.py` for criteria
+fields, `sweep_batch.py` for batch size, position, and reference form); then select per-action
+thresholds from the error and review costs and check them once on untouched data. The skill asks
+for the evidence behind each step rather than treating a reported improvement as established.
+
+### Run the scripts directly
+
+The scripts are the skill's helpers and also work on their own. They live in
+`skills/jev-frame-engineering/scripts/` in a clone,
+`~/.claude/skills/jev-frame-engineering/scripts/` under a symlinked install, and
+`~/.claude/plugins/cache/blue-terra/jev-frame-engineering/<version>/skills/jev-frame-engineering/scripts/`
+under a plugin install. Each script prints its own usage with `--help`, and the file formats are
+specified in the [evaluation protocol](skills/jev-frame-engineering/references/eval-protocol.md).
+
+A run needs a question set and labelled items. `questions.json`:
+
+```json
+{
+  "model": "jev-1.13.0",
+  "questions": {
+    "queue": {
+      "type": "choice",
+      "instructions": "`message` is a support ticket. Which queue should handle it?",
+      "criteria": {
+        "billing": {"what": "charges, invoices, refunds", "not_for": "pre-sales questions"},
+        "technical": {"what": "the product misbehaves"},
+        "other": {"what": "anything the options above do not cover"}
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Does `message` need attention today?",
+      "criteria": {"true": "an outage or a same-day deadline", "false": "a routine request"}
+    }
+  }
+}
+```
+
+`dev.jsonl`, one labelled item per line:
+
+```json
+{"id": "t01", "state": {"message": "I was charged twice this month."}, "expected": {"queue": "billing", "urgent": false}}
+{"id": "t02", "state": {"message": "Export has failed with a 500 since this morning."}, "expected": {"queue": "technical", "urgent": true}}
+```
+
+```sh
+export TYPESAFE_API_KEY=...          # or ~/.config/typesafe/api_key, mode 600
+cd skills/jev-frame-engineering
+python3 scripts/eval.py --questions questions.json --items dev.jsonl --repeat 3
+```
+
+`eval.py` checks every label against the question set before its first request and refuses a
+file whose values a question cannot take, then reports per-class recall and precision, counts at
+the policy threshold, failures, and token use, separately for each `--items` file; `--verbose` adds confidence buckets and the miss
+list, and `--json out.json` keeps the raw answers. The others follow the same shape; `ablate.py` and `sweep_batch.py` also print the
+Choice option with the lowest recall in each cell, since overall accuracy can hold while one
+class collapses:
+
+```sh
+python3 scripts/ablate.py --questions questions.json --question queue --items dev.jsonl
+python3 scripts/sweep_batch.py --batch-template batch-template.json --items dev.jsonl --sizes 1,8,16,32
+python3 scripts/token_probe.py
+```
+
+Each of these calls the live API with your credential and is billed by TypeSafe; `--repeat` and
+`--sizes` multiply that cost. The offline tests in `tests/` are the part of the repository that
+runs without a key.
 
 ### Accuracy and evidence
 
