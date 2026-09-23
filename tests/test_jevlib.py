@@ -318,6 +318,195 @@ class ReportingBehavior(unittest.TestCase):
         self.assertEqual(out.getvalue().count("failed 30/30"), 2)
         self.assertIn("no scored answers", out.getvalue())
 
+    def sweep_rows(self, fake_post, sizes="1,8", billing_at=(3, 27)):
+        """Run sweep_batch over a 30-ticket file whose billing tickets sit at billing_at (one in the first full batch
+        of 8, one in the trailing batch of 6, so nothing depends on where a batch boundary falls) and return the
+        printed size rows. fake_post(state, questions, model, key) stands in for the API."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            with open(fx["dev.jsonl"], "w") as f:
+                for i in range(30):
+                    text = f"billing ticket {i}" if i in billing_at else f"export fails {i}"
+                    f.write(json.dumps({"id": f"t{i:02d}", "state": {"message": text},
+                                        "expected": {"queue": "billing" if i in billing_at else "technical", "urgent": False}}) + "\n")
+            argv = ["sweep_batch.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"], "--sizes", sizes, "--sleep", "0"]
+            with patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
+                    patch.object(J, "post", side_effect=fake_post), redirect_stdout(out):
+                sweep_batch.main()
+        return [l for l in out.getvalue().splitlines() if re.match(r"^\s*\d+\s+(\d+|-)\s", l)]   # size rows: N, q/req, cells
+
+    @staticmethod
+    def routing_fake(misroute):
+        """Answers every ticket by its text (the fixture writes 'billing ticket N' for billing) and misroutes the tickets
+        misroute(ticket, batch) says to, so a test controls the outcome by ticket and batch size, not by batch order."""
+        def fake_post(state, questions, model, key):
+            tickets = state["messages"]   # keyed mode: an object in item order; quoted/index: a list
+            tickets = list(tickets.values()) if isinstance(tickets, dict) else tickets
+            answers = {}
+            for qid, q in questions.items():
+                if q["type"] == "noul":
+                    answers[qid] = {"type": "noul", "noul": 0.2}; continue
+                ticket = tickets[int(qid.rsplit("__", 1)[1])]   # run_batched asks each question once per item, as qid__j
+                truth = "billing" if ticket.startswith("billing") else "technical"
+                choice = "technical" if truth == "billing" and misroute(ticket, tickets) else truth
+                answers[qid] = {"type": "choice", "choice": choice, "confidence": 0.9,
+                                "probabilities": {k: (0.9 if k == choice else 0.1) for k in q["criteria"]}}
+            return response(answers), 120
+        return fake_post
+
+    def test_sweep_flags_a_rare_class_collapse_that_fine_hides(self):
+        # 28 technical + 2 billing. Once a request carries more than one ticket the fake misroutes billing tickets to
+        # technical: both of them (billing 2/2 -> 0/2 while fine drops only 30 -> 28, below the fine rule) must flag;
+        # one of them (2/2 -> 1/2) is a single-item swing and must not, or every rare class would flag on noise.
+        for lost, fine, low, flagged in ((("billing ticket 3", "billing ticket 27"), "fine  28/30", "low billing 0/2", True),
+                                         (("billing ticket 27",), "fine  29/30", "low billing 1/2", False)):
+            with self.subTest(lost=lost):
+                lines = self.sweep_rows(self.routing_fake(lambda t, batch: len(batch) > 1 and t in lost))
+                self.assertEqual(len(lines), 2)
+                self.assertIn("fine  30/30", lines[0]); self.assertIn("low billing 2/2", lines[0]); self.assertNotIn("investigate", lines[0])
+                self.assertIn(fine, lines[1]); self.assertIn(low, lines[1])
+                (self.assertIn if flagged else self.assertNotIn)("investigate (heuristic): queue", lines[1])
+
+    def test_sweep_does_not_read_a_failed_batch_as_an_accuracy_drop(self):
+        # one batch of 8 times out at N=8: the scored rows are still all right (22/22), so nothing may flag even
+        # though 22 is more than three hits below the 30/30 of N=1
+        routed = self.routing_fake(lambda t, batch: False)
+
+        def fake_post(state, questions, model, key):
+            tickets = state["messages"]; tickets = list(tickets.values()) if isinstance(tickets, dict) else tickets
+            if len(tickets) > 1 and "export fails 8" in tickets:
+                raise J.JevNoJudgment("timed out")
+            return routed(state, questions, model, key)
+        lines = self.sweep_rows(fake_post)
+        self.assertIn("fine  22/22", lines[1]); self.assertIn("failed 8/30", lines[1])
+        self.assertNotIn("investigate", lines[1])
+
+    def test_choice_drop_rules(self):
+        def rowd(fine, n, conf=0.9, **classes):
+            return {"type": "choice", "fine": fine, "n": n, "mean_conf": conf,
+                    "per_class": {lab: {"n": c[1], "hits": c[0], "recall": c[0] / c[1]} for lab, c in classes.items()}}
+        drop = sweep_batch.choice_drop
+        # items lost are the recall drop over the smaller of the two labelled counts, so a best size with a
+        # different count is never compared hit-for-hit: 4/8, then 3/3 after a failed batch, then 2/6 loses
+        # two of the three the best size can vouch for and flags
+        b = {}
+        self.assertFalse(drop(rowd(24, 30, billing=(4, 8)), b))
+        self.assertFalse(drop(rowd(22, 25, billing=(3, 3)), b))
+        self.assertTrue(drop(rowd(24, 28, billing=(2, 6)), b))
+        # a size that scored one item of a class at full recall cannot vouch for two items, so a later size that
+        # merely repeats the baseline does not flag against it
+        b = {}
+        self.assertFalse(drop(rowd(24, 30, billing=(2, 8)), b))
+        self.assertFalse(drop(rowd(18, 23, billing=(1, 1)), b))
+        self.assertFalse(drop(rowd(24, 30, billing=(2, 8)), b))
+        # nor can two items prove a collapse on eight, while 8/8 -> 6/8 is the documented rule exactly
+        b = {}
+        drop(rowd(28, 30, billing=(2, 2)), b)
+        self.assertFalse(drop(rowd(26, 30, billing=(4, 8)), b))
+        b = {}
+        drop(rowd(30, 30, billing=(8, 8)), b)
+        self.assertTrue(drop(rowd(28, 30, billing=(6, 8)), b))
+        # a one-item class cannot lose two items, so 1/1 -> 0/1 is noise, and 2/2 -> 1/2 stays below the floor
+        b = {}
+        drop(rowd(30, 30, rare=(1, 1)), b)
+        self.assertFalse(drop(rowd(29, 30, rare=(0, 1)), b))
+        b = {}
+        drop(rowd(30, 30, billing=(2, 2)), b)
+        self.assertFalse(drop(rowd(29, 30, billing=(1, 2)), b))
+        self.assertTrue(drop(rowd(28, 30, billing=(0, 2)), b))
+        # fine: three items below the best accuracy over the smaller count; a shrunken n at the same accuracy is no drop
+        b = {}
+        drop(rowd(30, 30), b)
+        self.assertFalse(drop(rowd(22, 22), b))
+        self.assertFalse(drop(rowd(20, 22), b))
+        self.assertTrue(drop(rowd(19, 22), b))
+        self.assertTrue(drop(rowd(30, 30, conf=0.85), b))
+        self.assertEqual(b["classes"], {})
+        # the first row never flags, the best is kept in place rather than rebuilt, and a tie goes to the larger count
+        b = {}
+        self.assertFalse(drop(rowd(10, 30, conf=0.5, a=(1, 4)), b))
+        first = b["classes"]
+        drop(rowd(30, 30, conf=0.9, a=(4, 4)), b); drop(rowd(20, 20, conf=0.9, a=(2, 2)), b)
+        self.assertIs(b["classes"], first); self.assertEqual(b, {"classes": {"a": [(1.0, 4)]}, "acc": [(1.0, 30)], "conf": 0.9})
+        # a perfect score on a few items (most batches failed) does not hide a later fall from a large sample:
+        # 2/2, then 90/100, then 50/100 flags on fine, and the same shape flags a class
+        b = {}
+        drop(rowd(2, 2), b); self.assertFalse(drop(rowd(90, 100), b))
+        self.assertTrue(drop(rowd(50, 100), b))
+        self.assertEqual(b["acc"], [(1.0, 2), (0.9, 100)])
+        b = {}
+        drop(rowd(30, 30, billing=(1, 1)), b); self.assertFalse(drop(rowd(30, 30, billing=(9, 10)), b))
+        self.assertTrue(drop(rowd(30, 30, billing=(5, 10)), b))
+
+    def test_scripts_refuse_a_bad_label_file_before_any_request(self):
+        # a misspelt option, a string "false" and a null Score level are caught by check_labels in every script:
+        # exit 2, the item and label named on stderr, and post never called
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            with open(fx["dev.jsonl"], "a") as f:
+                f.write(json.dumps({"id": "t30", "state": {"message": "x"}, "expected": {"queue": "biling", "urgent": "false"}}) + "\n")
+            for argv in (["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"]],
+                         ["eval.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"]],
+                         ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", fx["dev.jsonl"]],
+                         ["sweep_batch.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"]]):
+                main = {"eval.py": ev.main, "ablate.py": ablate.main, "sweep_batch.py": sweep_batch.main}[argv[0]]
+                err = io.StringIO()
+                with self.subTest(argv=argv[:3]), patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
+                        patch.object(J, "post") as call, redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as caught:
+                        main()
+                    self.assertEqual(caught.exception.code, 2)
+                    call.assert_not_called()
+                    self.assertIn('t30: queue="biling"', err.getvalue())
+                    if "ablate.py" not in argv:   # ablate sends only the target question, so it checks only that label
+                        self.assertIn('t30: urgent="false"', err.getvalue())
+
+    def test_a_bad_label_file_is_refused_before_the_earlier_files_are_billed(self):
+        # a second --items file is checked with the first: the clean dev set must not be run and billed before
+        # the bad val set is looked at
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            val = os.path.join(d, "val.jsonl")
+            with open(val, "w") as f:
+                f.write(json.dumps({"id": "v0", "state": {"message": "x"}, "expected": {"queue": "biling"}}) + "\n")
+            for argv in (["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"], "--items", val],
+                         ["ablate.py", "--questions", fx["questions.json"], "--question", "queue",
+                          "--items", fx["dev.jsonl"], "--items", val],
+                         ["sweep_batch.py", "--batch-template", fx["batch-template.json"],
+                          "--items", fx["dev.jsonl"], "--items", val]):
+                main = {"eval.py": ev.main, "ablate.py": ablate.main, "sweep_batch.py": sweep_batch.main}[argv[0]]
+                err = io.StringIO()
+                with self.subTest(script=argv[0]), patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
+                        patch.object(J, "post") as call, redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as caught:
+                        main()
+                    self.assertEqual(caught.exception.code, 2)
+                    call.assert_not_called()
+                    self.assertIn('v0: queue="biling"', err.getvalue())
+
+    def test_a_malformed_question_set_is_named_instead_of_the_label_file(self):
+        # a misspelt `type` makes every label invalid; the error must name the question, not send the reader
+        # to a label file that is correct, and no request may be sent either way
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            with open(fx["questions.json"]) as f:
+                qset = json.load(f)
+            qset["questions"]["queue"]["type"] = "Choice"
+            with open(fx["questions.json"], "w") as f:
+                json.dump(qset, f)
+            argv = ["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"]]
+            err = io.StringIO()
+            with patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
+                    patch.object(J, "post") as call, redirect_stdout(io.StringIO()), redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    ev.main()
+            self.assertEqual(caught.exception.code, 2)
+            call.assert_not_called()
+            self.assertIn("fix the questions, not the label file", err.getvalue())
+            self.assertIn("queue: type 'Choice'", err.getvalue())
+            self.assertNotIn("t00", err.getvalue())
+
     def test_all_failed_ablation_does_not_claim_zero_error(self):
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as d:

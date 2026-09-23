@@ -13,6 +13,12 @@ Items are JSONL:
 
 Expected values are option names for Choice, JSON booleans for Noul, and zero-based rubric
 positions for Score. Partial labels are allowed. Score predictions can fall between levels.
+Every script checks each label against the question set before its first request and refuses
+the file, naming the items, when a value is one the question cannot take (a misspelt option,
+the string `"false"`, a level off the rubric), so a label-file mistake costs no API calls. Every
+`--items` file is checked before the first of them is run, not as its turn comes. A question that
+can take no label at all — a misspelt `type`, a Choice or Score with no `criteria` — is reported
+as a question-set fault naming the question, so a correct label file is not blamed for it.
 
 Split before tuning, keeping related records and near duplicates in the same split. Use dev for
 wording, validation for model/threshold selection, and an untouched test set for final reporting.
@@ -52,14 +58,32 @@ levels, since their order defines the scale. Use the production option order for
 
 `eval.py` reports:
 
-- **Choice:** fine and optional coarse accuracy; accepted/correct counts at the policy threshold;
-  mean confidence; per-bucket and cumulative accuracy/coverage; batch position quarters.
-- **Noul:** caught positives, false positives, class counts, lowest true and highest false outputs.
-  Derive recall as caught/positives and precision as caught/(caught + false positives), when those
-  denominators are nonzero. These are threshold metrics, not a complete calibration analysis.
+- **Choice:** fine and optional coarse accuracy; per-class recall and precision for every option,
+  printed as hits/labelled and hits/predicted with `-` for a zero denominator (the headline on an
+  imbalanced label set, where overall accuracy can hide a class that is never caught);
+  accepted/correct counts at the policy threshold; mean confidence; with `--verbose`, per-bucket
+  and cumulative accuracy/coverage, batch position quarters and the miss list. An answer outside
+  the option list never reaches the scorer: the client rejects it and the item counts as a
+  failure. `ablate.py` and `sweep_batch.py` print the option with the lowest recall in each cell
+  (a recall tie goes to the option with the least support), and the sweep flags an option whose
+  recall falls by 0.25 from any earlier size while losing at least two items against it. Items lost are the
+  recall drop over the smaller of the two sizes' labelled counts, since a drop is only as credible
+  as the smaller sample: a size that scored one item of a class cannot set off the flag, and a
+  failed batch that shrinks the count is not read as a loss. The fine-accuracy flag uses the same
+  floor at three items. Every earlier size that no other beats on both rate and count is kept
+  for comparison, so a perfect score on a few items cannot hide a later fall from a large sample.
+- **Noul:** caught positives, false positives, class counts, and at the threshold recall
+  (caught/positives), precision (caught/(caught + false positives)) and true negative rate
+  ((negatives − false positives)/negatives), each printed as `-` when its denominator is zero;
+  lowest true and highest false outputs. These are threshold metrics, not a calibration analysis.
 - **Score:** mean absolute error and predictions within half a rubric level.
 - **Failures:** items without answers. Accuracy and buckets condition on successful, labelled
   answers; include failure rate when reporting end-to-end coverage.
+- **Unlisted labels:** rows whose label the question cannot take, should any reach the scorer
+  (the scripts refuse them before the first request; `jevlib.score` is also called on rows from
+  elsewhere). They are listed as JSON under `unlisted labels` for every question type, scored as
+  misses, and counted in no class, so every rate above is computed over labels the question can
+  take.
 
 The scorer does not apply a production policy, compute calibration curves/confidence intervals,
 or implement review. Coarse accuracy maps all labels to parents; it does not establish the

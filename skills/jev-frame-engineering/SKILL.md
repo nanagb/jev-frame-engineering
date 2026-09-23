@@ -164,10 +164,13 @@ uncertainty estimates, then check it on untouched data. More complex costs need 
 Below it, review, abstain, or use a separately validated coarse decision; a parent label is not
 automatically correct.
 
-For rare positives, report precision, recall, and prevalence at the operating threshold. Consider
+Report per-class recall and precision rather than overall accuracy whenever the labels are
+imbalanced, and for rare positives add prevalence at the operating threshold. Consider
 precision-recall curves/average precision as well as ROC-AUC; the latter can conceal a poor
-precision outcome at low prevalence. `eval.py` provides counts and Choice buckets, not those
-curves or a fitted calibrator. Reassess any calibration layer under traffic or base-rate changes.
+precision outcome at low prevalence. `eval.py` prints per-class recall and precision for each
+Choice option and recall, precision and true negative rate for each Noul at its threshold, plus
+Choice buckets; it does not draw those curves or fit a calibrator. Reassess any calibration layer
+under traffic or base-rate changes.
 
 ## 7. Keep failures distinct and cache the complete judgment input
 
@@ -187,14 +190,18 @@ See [production contract](references/production-contract.md) and the [pre-ship c
 
 Python 3, standard library only. Credentials come from `TYPESAFE_API_KEY` or
 `~/.config/typesafe/api_key`; set file permissions to 600 (the loader does not enforce the mode).
+Run them from this skill's directory (`python3 scripts/eval.py --help` prints each script's
+flags); every script except the offline helpers in `jevlib.py` calls the live API and is billed.
+Each checks the label file against the question set and refuses it before the first request, so
+a misspelt option or a string `"false"` is reported by item rather than billed and misreported.
 The client sanitizes its errors for the active credential. Raw evaluation output still contains
 input data and must be handled accordingly.
 
 | script | use |
 |---|---|
-| `eval.py` | Choice/Noul/Score metrics; repeats; single-item option reversal; batch evaluation; `--json` raw answers |
-| `ablate.py` | remove descriptive fields; compare metrics and usage, one target question at a time |
-| `sweep_batch.py` | compare batch sizes and position quarters; flags are heuristic, not significance tests |
+| `eval.py` | Choice/Noul/Score metrics with per-class recall/precision and Noul recall/precision/TNR; repeats; single-item option reversal; batch evaluation; `--json` raw answers |
+| `ablate.py` | remove descriptive fields; compare metrics (with the lowest per-class recall) and usage, one target question at a time |
+| `sweep_batch.py` | compare batch sizes and position quarters; flags a Choice drop in accuracy, confidence or an option's recall (item floors measured over the smaller of the two sizes' scored counts, so neither a failed batch nor a one-item class is a drop on its own), a Noul rise in false positives or highest-false score or fall in lowest-true score, and a last-quarter accuracy drop; flags are heuristic, not significance tests |
 | `token_probe.py` | inspect usage for minimal questions and synthetic text |
 | `jevlib.py` | HTTP client, runners, scoring, error redaction |
 

@@ -46,30 +46,40 @@ def main():
     for f in fields:
         allq = strip(allq, f)
     variants.append(("minus all", allq))
-    sets = {p: J.load_items(p) for p in a.items}
-    if absent:
-        print(f"note: {a.question} has no " + ", ".join(absent) + " — those variants are skipped, not measured as null")
-    if not fields:
-        print("nothing to ablate: the question carries none of the requested fields"); return
-    print(f"question {a.question}; sets: " + ", ".join(f"{os.path.basename(p)} ({len(v)})" for p, v in sets.items()))
-    print(f"{'variant':<18} " + "  ".join(f"{os.path.basename(p)[:12]:<32}" for p in sets) + "  tokens/item")
     try:
+        sets = {p: J.load_items(p) for p in a.items}
+        for p, items in sets.items():   # every label is checked against the question before the first billed request
+            J.check_labels(items, {a.question: base}, p)
+        if absent:
+            print(f"note: {a.question} has no " + ", ".join(absent) + " — those variants are skipped, not measured as null")
+        if not fields:
+            print("nothing to ablate: the question carries none of the requested fields"); return
+        print(f"question {a.question}; sets: " + ", ".join(f"{os.path.basename(p)} ({len(v)})" for p, v in sets.items()))
+        if base.get("type") == "choice":   # the legend describes a cell only a Choice question prints
+            print("low = the Choice option with the lowest recall, hits/labelled; overall accuracy can hold while one class collapses")
+        # column width: the widest cell this question can produce over these sets (every count at its maximum,
+        # its longest option name, the largest MAE on its rubric, coarse only when the policy rolls it up) or
+        # the no-answers note, measured rather than guessed so the tokens/item column stays aligned
+        n_max = max(len(v) for v in sets.values())
+        W = max(len(J.cell(J.worst_case(base, n_max, bool(policy.get(a.question, {}).get("parents"))))),
+                len(f"no scored answers (failed {n_max}/{n_max})"))
+        print(f"{'variant':<18} " + "  ".join(f"{os.path.basename(p)[:12]:<{W}}" for p in sets) + "  tokens/item")
         for name, q in variants:
-            cells = []; toks = []
+            cells = []; toks = []; notes = []
             for p, items in sets.items():
                 res = J.run_single(items, {a.question: q}, model, a.sleep); rep = J.score(res, {a.question: q}, policy)
-                r = rep["questions"].get(a.question, {}); toks.append(rep["tokens_per_item"] or 0)
+                r = rep["questions"].get(a.question)
+                if rep["tokens_per_item"] is not None:   # a set that answered nothing has no cost to average in;
+                    toks.append(rep["tokens_per_item"])  # counting it as 0 made the variant look cheaper than it is
                 if not r:
                     cells.append(f"no scored answers (failed {rep['failed']}/{rep['items']})")
-                elif r.get("type") == "choice":
-                    cells.append(f"fine {r['fine']:>2}/{r['n']} " + (f"coarse {r['coarse']:>2} " if r["coarse"] is not None else "") + f"≥thr {r['pass']:>2}({r['pass_correct']:>2}) conf {r['mean_conf']:.2f}")
-                elif r.get("type") == "noul":
-                    cells.append(f"caught {r['caught']}/{r['positives']} fp {r['false_positives']}/{r['negatives']} margin {J.fmt(r['lowest_true'])}/{J.fmt(r['highest_false'])}")
                 else:
-                    cells.append(f"MAE {r.get('mae', 0):.2f}")
-                if r and rep["failed"]:
-                    cells[-1] += f" failed {rep['failed']}/{rep['items']}"
-            print(f"{name:<18} " + "  ".join(f"{c:<32}" for c in cells) + f"  {sum(toks)/len(toks):6.0f}")
+                    cells.append(J.cell(r))
+                    if rep["failed"]:   # after the fixed-width columns, so a partial failure does not shift them
+                        notes.append(f"{os.path.basename(p)} failed {rep['failed']}/{rep['items']}")
+            print(f"{name:<18} " + "  ".join(f"{c:<{W}}" for c in cells)
+                  + f"  {J.fmt(sum(toks) / len(toks) if toks else None, 0):>6}"
+                  + (f"  {'; '.join(notes)}" if notes else ""))
     except J.JevError as e:
         print(f"error: {J.redact(str(e))}", file=sys.stderr); sys.exit(2)
 

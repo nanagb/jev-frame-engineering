@@ -67,8 +67,11 @@ def main():
     qset = J.load_json(a.batch_template) if a.batch_template else J.load_json(a.questions)
     dump = {}
     try:
-        for path in a.items:
-            items = J.load_items(path); runs = []
+        loaded = [(path, J.load_items(path)) for path in a.items]
+        for path, items in loaded:   # every file is checked before the first billed request, not just the first
+            J.check_labels(items, qset, path)
+        for path, items in loaded:
+            runs = []
             for k in range(a.repeat):
                 if a.batch_template:
                     res = J.run_batched(items, qset, a.batch_size, a.model, a.sleep)
