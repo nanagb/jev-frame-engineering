@@ -5,8 +5,10 @@
             [--policy policy.json] [--fields not_for,examples,notes,inspect] [--model M]
 
 Only the target question is sent, so tokens/item isolates that question's cost; it is the mean over
-the sets, shown only when every set answered. Variants: full, minus each field present, and minus all
-when more than one is. Select on tuning data and report on an untouched holdout.
+the sets, shown only when every set answered. "vs full" is a variant's difference from full on the
+items both answered, the figure to compare variants by when some items fail. Variants: full, minus
+each field present, and minus all when more than one is. Select on tuning data and report on an
+untouched holdout.
 """
 import argparse, copy, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,25 +80,35 @@ def main():
         W = max(J.width(J.cell(J.worst_case(base, n_max, bool(policy.get(a.question, {}).get("parents")), a.question))),
                 J.width(f"no scored answers (failed {n_max}/{n_max})"), *(J.width(n) for n in names.values()))
         V = max(J.width(name) for name, _ in [("variant", None)] + variants)
-        print(J.pad("variant", V) + " " + "  ".join(J.pad(names[p], W) for p in sets) + "  tokens/item")
+        print(J.pad("variant", V) + " " + "  ".join(J.pad(names[p], W) for p in sets) + "  tokens/item  vs full")
+        full = {}   # set -> the full variant's tokens per item, None where the item failed
         for name, q in variants:
-            cells = []; toks = []; notes = []
+            cells = []; toks = []; notes = []; deltas = []
             for p, items in sets.items():
                 res = J.run_single(items, one(q), model, a.sleep); rep = J.score(res, one(q), policy)
                 r = rep["questions"].get(a.question)
                 if rep["tokens_per_item"] is not None:
                     toks.append(rep["tokens_per_item"])
+                per_item = [row["tokens"] if row.get("answers") else None for row in res]   # run_single keeps item order
+                if name == "full":
+                    full[p] = per_item
+                else:
+                    pairs = [(t, f) for t, f in zip(per_item, full[p]) if t is not None and f is not None]
+                    if pairs:
+                        deltas.append(sum(t - f for t, f in pairs) / len(pairs))
                 if not r:
                     cells.append(f"no scored answers (failed {rep['failed']}/{rep['items']})")
                 else:
                     cells.append(J.cell(r))
                     if rep["failed"]:   # after the fixed-width columns, so a partial failure does not shift them
                         notes.append(f"{names[p]} failed {rep['failed']}/{rep['items']}")
-            # the mean over the sets only when every set answered: a set that answered nothing has no cost, and a mean
-            # over the others covers a different mix of sets than the other rows, which can reverse a saving
-            print(J.pad(name, V) + " " + "  ".join(J.pad(c, W) for c in cells)
-                  + f"  {J.fmt(sum(toks) / len(toks) if len(toks) == len(sets) else None, 0):>6}"
-                  + (f"  {'; '.join(notes)}" if notes else ""))
+            # tokens/item: the mean over the sets, only when every set answered, since a mean over the others covers a
+            # different mix of sets than the other rows. vs full: the difference from full on the items both
+            # answered, so it does not move with which items failed; this is the figure to compare variants by
+            tok = J.fmt(sum(toks) / len(toks) if len(toks) == len(sets) else None, 0)
+            vs = "" if name == "full" else (f"{round(sum(deltas) / len(deltas)):+d}" if len(deltas) == len(sets) else "-")
+            print((J.pad(name, V) + " " + "  ".join(J.pad(c, W) for c in cells) + f"  {tok:>11}  {vs:>7}"
+                   + (f"  {'; '.join(notes)}" if notes else "")).rstrip())
     except J.JevError as e:
         print(f"error: {J.redact(str(e))}", file=sys.stderr); sys.exit(2)
 

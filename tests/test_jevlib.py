@@ -772,9 +772,34 @@ class ReportingBehavior(unittest.TestCase):
             code, out, _, _ = self.run_script(argv, self.single_fake(fail=fail))
         self.assertIsNone(code)
         _, (full, minus) = self.table(out)
-        self.assertTrue(full.endswith("   100"), full)
+        self.assertEqual(full.split()[-1], "100")   # full has no "vs full" figure
         self.assertIn("no scored answers (failed 10/10)", minus)
-        self.assertTrue(minus.endswith("     -"), minus)
+        self.assertEqual(minus.split()[-2:], ["-", "-"])   # no tokens/item, and no difference from full over val
+
+    def test_ablate_compares_token_cost_with_full_on_the_same_items(self):
+        # the ten longest tickets fail once examples are removed: that variant's mean over the rest looks cheaper by
+        # their length (353 against 453), while "vs full" compares the items both answered and shows the true -50
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d); items = os.path.join(d, "items.jsonl")
+            with open(items, "w") as f:
+                for i in range(30):
+                    f.write(json.dumps({"id": str(i), "state": {"message": "charged " + "x" * (10 * i)}, "expected": {"queue": "billing"}}) + "\n")
+
+            def fake(state, questions, model, key):
+                examples = "examples" in questions["queue"]["criteria"]["billing"]
+                if not examples and len(state["message"]) > 200:
+                    raise J.JevNoJudgment("timed out")
+                answer = {"type": "choice", "choice": "billing", "confidence": 0.9, "probabilities": {"billing": 0.9, "technical": 0.1}}
+                return {"model": J.DEFAULT_MODEL, "answers": {"queue": answer},
+                        "usage": {"input_tokens": (300 if examples else 250) + len(state["message"]), "output_tokens": 1}}, 10
+            argv = ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", items, "--fields", "examples", "--sleep", "0"]
+            code, out, _, _ = self.run_script(argv, fake)
+        self.assertIsNone(code)
+        header, (full, minus) = self.table(out)
+        self.assertTrue(header.endswith("tokens/item  vs full"), header)
+        self.assertEqual(full.split()[-1], "453")
+        self.assertEqual(minus.split("  items.jsonl failed")[0].split()[-2:], ["353", "-50"])
+        self.assertIn("items.jsonl failed 10/30", minus)
 
     def test_ablate_names_sets_that_share_a_file_name_by_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -806,9 +831,9 @@ class ReportingBehavior(unittest.TestCase):
         self.assertIsNone(code)
         header, rows = self.table(out)
         self.assertIn("low 技術 2/2", rows[0])
-        edge = J.width(header[:-len("  tokens/item")])
-        for row in rows:
-            self.assertEqual(J.width(row[:-8]), edge, row)   # each row ends with two spaces and a 6-wide tokens field
+        edge = J.width(header[:header.index("tokens/item") + len("tokens/item")])
+        for row in rows:   # the tokens figure (100) ends where its header does
+            self.assertEqual(J.width(row[:row.rindex("100") + 3]), edge, row)
 
 
 class ScriptHygiene(unittest.TestCase):

@@ -251,7 +251,8 @@ for each `--items` file, per-class recall and precision over all answers and at 
 threshold, failures, and token use; `--verbose` adds confidence buckets and the miss list, and
 `--json out.json` keeps the raw answers. `ablate.py` makes the same checks and prints one column
 per `--items` file, each cell ending with the Choice option with the lowest recall, since overall
-accuracy can hold while one class collapses:
+accuracy can hold while one class collapses, and compares each variant's token cost with the full
+question on the items both answered:
 
 ```sh
 python3 "$S/ablate.py" --questions questions.json --question queue --items dev.jsonl
