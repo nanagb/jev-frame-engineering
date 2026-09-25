@@ -63,14 +63,13 @@ def main():
         ap.error("--repeat and --batch-size must be positive")
     if a.permute_options and a.batch_template:
         ap.error("--permute-options works in single mode (--questions)")
-    policy = J.load_json(a.policy) if a.policy else {}
-    qset = J.load_json(a.batch_template) if a.batch_template else J.load_json(a.questions)
     dump = {}
     try:
-        loaded = [(path, J.load_items(path)) for path in a.items]
-        for path, items in loaded:   # every file is checked before the first billed request, not just the first
-            J.check_labels(items, qset, path)
-        for path, items in loaded:
+        policy = J.load_json(a.policy) if a.policy else {}
+        qset = J.load_json(a.batch_template) if a.batch_template else J.load_json(a.questions)
+        if a.batch_template:
+            J.check_template(qset)
+        for path, items in J.load_labelled(a.items, qset):   # every file is checked before the first billed request
             runs = []
             for k in range(a.repeat):
                 if a.batch_template:

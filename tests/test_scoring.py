@@ -4,10 +4,10 @@
 
 Covers per-class recall/precision on Choice (single and batched rows), lowest_recall, recall/precision/TNR
 on Noul, labels a question cannot take (refused by check_labels before any request; never a hit, never a
-class, and never a traceback when they reach score() anyway), and the table cells the scripts measure
-their columns from.
+class, and never a traceback when they reach score() anyway), question sets no request could be built from,
+input files that cannot be read, and the table cells the scripts measure their columns from.
 """
-import io, contextlib, unittest
+import io, contextlib, os, tempfile, unittest
 try:
     from . import scripts_path  # noqa: F401  (package run: python3 -m unittest tests.test_scoring)
 except ImportError:
@@ -232,12 +232,56 @@ class LabelCheck(unittest.TestCase):
         # a broken question the file never labels is not this file's problem
         J.check_labels(items, {"other": {"type": "wat"}})
 
+    def test_criteria_of_the_wrong_shape_are_named_as_question_faults(self):
+        # the API takes a Choice's criteria as an object and a Score's as an array; anything else made every correct
+        # label read as unlisted (a list or a string of option names) or raised a TypeError (a number), blaming or
+        # crashing on a label file that is right
+        items = [{"id": "t0", "state": "x", "expected": {"queue": "billing", "sev": 1}}]
+        for qset, fragment in (
+                ({"queue": {"type": "choice", "criteria": [{"name": "billing"}]}},
+                 "queue: a choice question needs 'criteria', an object of option name to description, not an array"),
+                ({"queue": {"type": "choice", "criteria": "billing technical"}}, "not a string"),
+                ({"queue": {"type": "choice", "criteria": {}}}, "not an empty object"),
+                ({"sev": {"type": "score", "criteria": 5}}, "sev: a score question needs 'criteria', an array of levels, not a number"),
+                ({"sev": {"type": "score", "criteria": {"0": "low", "1": "high"}}}, "not an object")):
+            with self.subTest(qset=qset), self.assertRaises(J.JevError) as caught:
+                J.check_labels(items, qset, "dev.jsonl")
+            self.assertIn(fragment, str(caught.exception))
+            self.assertIn("fix the questions, not the label file", str(caught.exception))
+
+    def test_check_questions_names_every_faulty_question_labelled_or_not(self):
+        # eval.py once sent an unlabelled malformed question to fail at the API; the scripts now refuse it first
+        good = {"type": "noul", "instructions": "q"}
+        J.check_questions({"questions": {"flag": good, "queue": self.QSET["questions"]["queue"]}})
+        with self.assertRaises(J.JevError) as caught:
+            J.check_questions({"questions": {"flag": good, "extra": {"type": "nul"}, "sev": {"type": "score"}}})
+        msg = str(caught.exception)
+        self.assertIn("no request was sent", msg)
+        self.assertIn("extra: type 'nul'", msg); self.assertIn("sev: a score question needs 'criteria'", msg)
+        self.assertNotIn("flag:", msg)
+        for empty in ({}, {"questions": {}}, {"questions": []}, []):
+            with self.subTest(qset=empty), self.assertRaises(J.JevError):
+                J.check_questions(empty)
+
+    def test_a_refused_label_file_says_what_each_question_takes(self):
+        items = [{"id": "t0", "state": "x", "expected": {"queue": "zzz", "flag": 1, "sev": "2"}}]
+        with self.assertRaises(J.JevError) as caught:
+            J.check_labels(items, self.QSET, "dev.jsonl")
+        msg = str(caught.exception)
+        for hint in ('queue takes one of "a", "b"', "flag takes JSON true or false", "sev takes a number from 0 to 2"):
+            self.assertIn(hint, msg)
+        many = {"q": {"type": "choice", "criteria": {f"o{i}": "" for i in range(11)}}}
+        self.assertIn('"o7" and 3 more', J.accepts(many["q"]))
+
     def test_worst_case_refuses_a_question_it_cannot_size(self):
         # ablate.py and sweep_batch.py size their columns from this before any row exists; a raw KeyError
         # there is a traceback instead of the scripts' `error: ...` exit
         for q in ({"criteria": {"a": "A"}}, {"type": "choice"}, {"type": "wat", "criteria": {"a": "A"}}):
             with self.subTest(q=q), self.assertRaises(J.JevError):
                 J.worst_case(q, 10)
+        with self.assertRaises(J.JevError) as caught:
+            J.worst_case({"type": "choice"}, 10, qid="queue")
+        self.assertIn("cannot size a report column for queue", str(caught.exception))
 
     def test_check_names_every_offending_item_and_sends_nothing(self):
         items = [{"id": "ok", "state": "x", "expected": {"queue": "a", "flag": False, "sev": 2}},
@@ -259,7 +303,6 @@ class LabelCheck(unittest.TestCase):
         J.check_labels(items[3:5], {"questions": {"unrelated": {"type": "noul"}}})   # only questions in the set are checked
 
     def test_load_items_rejects_a_non_object_expected(self):
-        import os, tempfile
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "dev.jsonl")
             with open(path, "w") as f:
@@ -267,6 +310,56 @@ class LabelCheck(unittest.TestCase):
             with self.assertRaises(J.JevError) as caught:
                 J.load_items(path)
             self.assertIn("line 1", str(caught.exception))
+
+
+class InputFiles(unittest.TestCase):
+    """A missing or malformed input file exits with a message naming it, not a traceback."""
+    def write(self, d, name, text):
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_load_items_names_the_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            for text, fragment in (('{"state": "x"}\n{"state": \n', "line 2: not valid JSON"),
+                                   ('# header\n["x"]\n', "line 2: an item must be a JSON object"),
+                                   ('{"id": "a"}\n', "line 1: item has no 'state'")):
+                with self.subTest(text=text), self.assertRaises(J.JevError) as caught:
+                    J.load_items(self.write(d, "dev.jsonl", text))
+                self.assertIn(fragment, str(caught.exception))
+            with self.assertRaises(J.JevError) as caught:
+                J.load_items(os.path.join(d, "missing.jsonl"))
+            self.assertIn("cannot read", str(caught.exception))
+
+    def test_an_item_without_an_id_is_named_by_its_line(self):
+        # the id defaults to the line in the file (1-based, counting comments and blanks), the same number the
+        # load errors use, so a refused label points at the line that holds it
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, "dev.jsonl", '# v2\n{"state": "x", "expected": {"flag": true}}\n\n{"state": "y", "expected": {"flag": "no"}}\n')
+            items = J.load_items(path)
+            self.assertEqual([it["id"] for it in items], ["2", "4"])
+            with self.assertRaises(J.JevError) as caught:
+                J.check_labels(items, {"flag": {"type": "noul"}}, path)
+            self.assertIn('4: flag="no"', str(caught.exception))
+
+    def test_load_json_names_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(J.JevError) as caught:
+                J.load_json(self.write(d, "q.json", '{"questions": '))
+            self.assertIn("q.json is not valid JSON", str(caught.exception))
+            with self.assertRaises(J.JevError) as caught:
+                J.load_json(os.path.join(d, "missing.json"))
+            self.assertIn("cannot read", str(caught.exception))
+
+    def test_a_question_set_is_not_a_batch_template(self):
+        J.check_template({"array_field": "messages", "questions": {}})
+        for tpl in ({"questions": {}}, {"array_field": "m"}, []):
+            with self.subTest(tpl=tpl), self.assertRaises(J.JevError) as caught:
+                J.check_template(tpl)
+            self.assertIn("a batch template needs", str(caught.exception))
+        with self.assertRaises(J.JevError):   # run_batched refuses it too, before any request
+            J.run_batched([{"id": "0", "state": "x"}], {"questions": {}}, 1, key="k")
 
 
 class TableCells(unittest.TestCase):

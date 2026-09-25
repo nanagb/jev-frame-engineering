@@ -1,9 +1,12 @@
 """Offline behavior tests for request handling, batching, and evaluation reporting."""
+import ast
 import copy
 import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -439,28 +442,52 @@ class ReportingBehavior(unittest.TestCase):
         drop(rowd(30, 30, billing=(1, 1)), b); self.assertFalse(drop(rowd(30, 30, billing=(9, 10)), b))
         self.assertTrue(drop(rowd(30, 30, billing=(5, 10)), b))
 
+    MAINS = {"eval.py": ev.main, "ablate.py": ablate.main, "sweep_batch.py": sweep_batch.main}
+
+    def run_script(self, argv, fake_post=None):
+        """Run a script's main() offline with argv; returns (exit code or None, stdout, stderr, the post mock)."""
+        out, err = io.StringIO(), io.StringIO(); code = None
+        with patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
+                patch.object(J, "post", side_effect=fake_post) as call, redirect_stdout(out), redirect_stderr(err):
+            try:
+                self.MAINS[argv[0]]()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue(), call
+
+    @staticmethod
+    def edit_json(path, change):
+        with open(path) as f:
+            data = json.load(f)
+        change(data)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
     def test_scripts_refuse_a_bad_label_file_before_any_request(self):
         # a misspelt option, a string "false" and a null Score level are caught by check_labels in every script:
-        # exit 2, the item and label named on stderr, and post never called
+        # exit 2, the item, the label and what the question takes named on stderr, and post never called
+        sev = {"type": "score", "instructions": "How severe is it?", "criteria": ["minor", "major", "outage"]}
         with tempfile.TemporaryDirectory() as d:
             fx = write_fixture(d)
+            for name in ("questions.json", "batch-template.json"):
+                self.edit_json(fx[name], lambda data: data["questions"].update(sev=sev))
             with open(fx["dev.jsonl"], "a") as f:
-                f.write(json.dumps({"id": "t30", "state": {"message": "x"}, "expected": {"queue": "biling", "urgent": "false"}}) + "\n")
+                f.write(json.dumps({"id": "t30", "state": {"message": "x"},
+                                    "expected": {"queue": "biling", "urgent": "false", "sev": None}}) + "\n")
             for argv in (["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"]],
                          ["eval.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"]],
                          ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", fx["dev.jsonl"]],
                          ["sweep_batch.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"]]):
-                main = {"eval.py": ev.main, "ablate.py": ablate.main, "sweep_batch.py": sweep_batch.main}[argv[0]]
-                err = io.StringIO()
-                with self.subTest(argv=argv[:3]), patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
-                        patch.object(J, "post") as call, redirect_stdout(io.StringIO()), redirect_stderr(err):
-                    with self.assertRaises(SystemExit) as caught:
-                        main()
-                    self.assertEqual(caught.exception.code, 2)
+                with self.subTest(argv=argv[:3]):
+                    code, _, err, call = self.run_script(argv)
+                    self.assertEqual(code, 2)
                     call.assert_not_called()
-                    self.assertIn('t30: queue="biling"', err.getvalue())
+                    self.assertIn('t30: queue="biling"', err)
+                    self.assertIn('queue takes one of "billing", "technical"', err)
                     if "ablate.py" not in argv:   # ablate sends only the target question, so it checks only that label
-                        self.assertIn('t30: urgent="false"', err.getvalue())
+                        self.assertIn('t30: urgent="false"', err)
+                        self.assertIn("t30: sev=null", err)
+                        self.assertIn("sev takes a number from 0 to 2", err)
 
     def test_a_bad_label_file_is_refused_before_the_earlier_files_are_billed(self):
         # a second --items file is checked with the first: the clean dev set must not be run and billed before
@@ -486,26 +513,80 @@ class ReportingBehavior(unittest.TestCase):
                     self.assertIn('v0: queue="biling"', err.getvalue())
 
     def test_a_malformed_question_set_is_named_instead_of_the_label_file(self):
-        # a misspelt `type` makes every label invalid; the error must name the question, not send the reader
-        # to a label file that is correct, and no request may be sent either way
+        # a misspelt `type` or a Choice given an array of options makes every label invalid, and a malformed
+        # question the file does not label would fail at the API; every script names the question before any
+        # request, and never sends the reader to a label file that is correct
+        faults = (("queue", {"type": "Choice"}, "queue: type 'Choice'"),
+                  ("queue", {"criteria": ["billing", "technical"]},
+                   "queue: a choice question needs 'criteria', an object of option name to description, not an array"),
+                  ("extra", {"type": "nul", "instructions": "x"}, "extra: type 'nul'"))
+        for qid, change, fragment in faults:
+            with tempfile.TemporaryDirectory() as d:
+                fx = write_fixture(d)
+                for name in ("questions.json", "batch-template.json"):
+                    self.edit_json(fx[name], lambda data: data["questions"].__setitem__(qid, {**data["questions"].get(qid, {}), **change}))
+                for argv in (["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"]],
+                             ["sweep_batch.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"]],
+                             ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", fx["dev.jsonl"]]):
+                    if qid == "extra" and argv[0] == "ablate.py":
+                        continue   # ablate sends only its target question
+                    with self.subTest(fault=fragment, script=argv[0]):
+                        code, _, err, call = self.run_script(argv)
+                        self.assertEqual(code, 2)
+                        call.assert_not_called()
+                        self.assertIn("fix the questions, not the label file", err)
+                        self.assertIn(fragment, err)
+                        self.assertNotIn("t00", err)
+
+    def test_bad_input_files_and_arguments_exit_with_a_message(self):
+        # each of these was a traceback: a missing second --items file, a question id ablate cannot find, a plain
+        # question set passed as a batch template, and a --sizes that is not a number
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d); missing = os.path.join(d, "val.jsonl")
+            dev, qs, tpl = fx["dev.jsonl"], fx["questions.json"], fx["batch-template.json"]
+            for argv, fragment in (
+                    (["eval.py", "--questions", qs, "--items", dev, "--items", missing], "cannot read " + missing),
+                    (["ablate.py", "--questions", qs, "--question", "queue", "--items", dev, "--items", missing], "cannot read " + missing),
+                    (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--items", missing], "cannot read " + missing),
+                    (["ablate.py", "--questions", qs, "--question", "queu", "--items", dev],
+                     "has no question 'queu'; its questions are queue, urgent"),
+                    (["sweep_batch.py", "--batch-template", qs, "--items", dev], "a batch template needs 'array_field'"),
+                    (["eval.py", "--batch-template", qs, "--items", dev], "a batch template needs 'array_field'"),
+                    (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--sizes", "1,x"], "--sizes must contain positive integers")):
+                with self.subTest(argv=argv):
+                    code, _, err, call = self.run_script(argv)
+                    self.assertEqual(code, 2)
+                    call.assert_not_called()
+                    self.assertIn(fragment, err)
+                    self.assertNotIn("Traceback", err)
+
+    def test_ablate_reads_a_question_named_questions_as_a_question(self):
+        # ablate wraps its target question itself; unwrapped, an id of "questions" was read as the wrapper, so its
+        # labels went unchecked and the request carried the question's fields as questions
         with tempfile.TemporaryDirectory() as d:
             fx = write_fixture(d)
             with open(fx["questions.json"]) as f:
-                qset = json.load(f)
-            qset["questions"]["queue"]["type"] = "Choice"
-            with open(fx["questions.json"], "w") as f:
-                json.dump(qset, f)
-            argv = ["eval.py", "--questions", fx["questions.json"], "--items", fx["dev.jsonl"]]
-            err = io.StringIO()
-            with patch("sys.argv", argv), patch.object(J, "load_key", return_value=KEY), \
-                    patch.object(J, "post") as call, redirect_stdout(io.StringIO()), redirect_stderr(err):
-                with self.assertRaises(SystemExit) as caught:
-                    ev.main()
-            self.assertEqual(caught.exception.code, 2)
+                queue = json.load(f)["questions"]["queue"]
+            qpath = os.path.join(d, "q.json"); items = os.path.join(d, "items.jsonl")
+            with open(qpath, "w") as f:
+                json.dump({"questions": {"questions": queue}}, f)
+            with open(items, "w") as f:
+                f.write(json.dumps({"id": "a", "state": {"message": "charged twice"}, "expected": {"questions": "billing"}}) + "\n")
+            answer = lambda state, questions, model, key: (response({qid: {
+                "type": "choice", "choice": "billing", "confidence": 0.9, "probabilities": {"billing": 0.9, "technical": 0.1}}
+                for qid in questions}), 100)
+            argv = ["ablate.py", "--questions", qpath, "--question", "questions", "--items", items, "--sleep", "0"]
+            code, out, _, call = self.run_script(argv, answer)
+            self.assertIsNone(code)
+            self.assertEqual(list(call.call_args.args[1]), ["questions"])
+            self.assertEqual(call.call_args.args[1]["questions"]["type"], "choice")
+            self.assertIn("fine   1/1", out)
+            with open(items, "a") as f:
+                f.write(json.dumps({"id": "b", "state": {"message": "x"}, "expected": {"questions": "biling"}}) + "\n")
+            code, _, err, call = self.run_script(argv, answer)
+            self.assertEqual(code, 2)
             call.assert_not_called()
-            self.assertIn("fix the questions, not the label file", err.getvalue())
-            self.assertIn("queue: type 'Choice'", err.getvalue())
-            self.assertNotIn("t00", err.getvalue())
+            self.assertIn('b: questions="biling"', err)
 
     def test_all_failed_ablation_does_not_claim_zero_error(self):
         out = io.StringIO()
@@ -518,6 +599,21 @@ class ReportingBehavior(unittest.TestCase):
                 ablate.main()
         self.assertIn("no scored answers (failed 30/30)", out.getvalue())
         self.assertNotIn("MAE 0.00", out.getvalue())
+
+
+class ScriptHygiene(unittest.TestCase):
+    def test_scripts_parse_as_python_3_7(self):
+        # the docs promise Python 3; an assignment expression in jevlib once broke every script on 3.6 and 3.7
+        for name in sorted(os.listdir(scripts_path.SCRIPTS)):
+            if name.endswith(".py"):
+                with self.subTest(script=name), open(os.path.join(scripts_path.SCRIPTS, name), encoding="utf-8") as f:
+                    ast.parse(f.read(), name, feature_version=(3, 7))
+
+    def test_jevlib_help_says_it_is_a_library(self):
+        run = subprocess.run([sys.executable, os.path.join(scripts_path.SCRIPTS, "jevlib.py"), "--help"],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0)
+        self.assertIn("it has no command line", run.stdout)
 
 
 if __name__ == "__main__":

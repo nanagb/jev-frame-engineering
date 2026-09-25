@@ -34,22 +34,28 @@ def main():
     ap.add_argument("--items", action="append", required=True); ap.add_argument("--policy")
     ap.add_argument("--fields", default="not_for,examples,notes,inspect"); ap.add_argument("--model"); ap.add_argument("--sleep", type=float, default=0.05)
     a = ap.parse_args()
-    qset = J.load_json(a.questions); qs = J.questions_of(qset); model = a.model or (qset.get("model") if isinstance(qset, dict) else None)
-    policy = J.load_json(a.policy) if a.policy else {}
-    base = qs[a.question]; asked = [f for f in a.fields.split(",") if f]
-    # Only ablate fields the question actually has. A "minus examples" row for a question with no
-    # examples repeats the full row and reads as a measured null result instead of an absent field.
-    fields = [f for f in asked if json.dumps(strip(base, f), sort_keys=True) != json.dumps(base, sort_keys=True)]
-    absent = [f for f in asked if f not in fields]
-    variants = [("full", base)] + [(f"minus {f}", strip(base, f)) for f in fields]
-    allq = base
-    for f in fields:
-        allq = strip(allq, f)
-    variants.append(("minus all", allq))
     try:
-        sets = {p: J.load_items(p) for p in a.items}
-        for p, items in sets.items():   # every label is checked against the question before the first billed request
-            J.check_labels(items, {a.question: base}, p)
+        qset = J.load_json(a.questions); qs = J.questions_of(qset) if isinstance(qset, dict) else None
+        model = a.model or (qset.get("model") if isinstance(qset, dict) else None)
+        policy = J.load_json(a.policy) if a.policy else {}
+        if not isinstance(qs, dict) or a.question not in qs:
+            raise J.JevError(f"{a.questions} has no question {a.question!r}"
+                             + (f"; its questions are {', '.join(qs)}" if isinstance(qs, dict) and qs else ""))
+        base = qs[a.question]; asked = [f for f in a.fields.split(",") if f]
+        # the target question alone, wrapped, so a question whose id is "questions" is not read as the wrapper
+        one = lambda q: {"questions": {a.question: q}}
+        # the question and every label are checked before the first billed request; only the target question is
+        # sent, so only its labels are
+        sets = dict(J.load_labelled(a.items, one(base)))
+        # Only ablate fields the question actually has. A "minus examples" row for a question with no
+        # examples repeats the full row and reads as a measured null result instead of an absent field.
+        fields = [f for f in asked if json.dumps(strip(base, f), sort_keys=True) != json.dumps(base, sort_keys=True)]
+        absent = [f for f in asked if f not in fields]
+        variants = [("full", base)] + [(f"minus {f}", strip(base, f)) for f in fields]
+        allq = base
+        for f in fields:
+            allq = strip(allq, f)
+        variants.append(("minus all", allq))
         if absent:
             print(f"note: {a.question} has no " + ", ".join(absent) + " — those variants are skipped, not measured as null")
         if not fields:
@@ -61,13 +67,13 @@ def main():
         # its longest option name, the largest MAE on its rubric, coarse only when the policy rolls it up) or
         # the no-answers note, measured rather than guessed so the tokens/item column stays aligned
         n_max = max(len(v) for v in sets.values())
-        W = max(len(J.cell(J.worst_case(base, n_max, bool(policy.get(a.question, {}).get("parents"))))),
+        W = max(len(J.cell(J.worst_case(base, n_max, bool(policy.get(a.question, {}).get("parents")), a.question))),
                 len(f"no scored answers (failed {n_max}/{n_max})"))
         print(f"{'variant':<18} " + "  ".join(f"{os.path.basename(p)[:12]:<{W}}" for p in sets) + "  tokens/item")
         for name, q in variants:
             cells = []; toks = []; notes = []
             for p, items in sets.items():
-                res = J.run_single(items, {a.question: q}, model, a.sleep); rep = J.score(res, {a.question: q}, policy)
+                res = J.run_single(items, one(q), model, a.sleep); rep = J.score(res, one(q), policy)
                 r = rep["questions"].get(a.question)
                 if rep["tokens_per_item"] is not None:   # a set that answered nothing has no cost to average in;
                     toks.append(rep["tokens_per_item"])  # counting it as 0 made the variant look cheaper than it is

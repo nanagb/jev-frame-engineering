@@ -133,31 +133,58 @@ def post(state, questions, model=DEFAULT_MODEL, key=None, timeout=20.0, max_retr
 # ---------- files ----------
 
 def load_json(path):
-    with open(os.path.expanduser(path)) as f:
-        return json.load(f)
+    """A JSON file, or JevError naming the file, so a missing or malformed input exits with a message."""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            return json.load(f)
+    except OSError as e:
+        raise JevError(f"cannot read {path}: {e.strerror}") from None
+    except ValueError as e:   # JSONDecodeError and UnicodeDecodeError
+        raise JevError(f"{path} is not valid JSON: {e}") from None
 
 
 def load_items(path):
-    """JSONL: {"id": ..., "state": <string|object|array>, "expected": {question_id: value}}."""
+    """JSONL: {"id": ..., "state": <string|object|array>, "expected": {question_id: value}}. An item without an
+    id gets its line number in the file, so an error that names the item points at the right line."""
     items = []
-    with open(os.path.expanduser(path)) as f:
-        for i, line in enumerate(f):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        raise JevError(f"cannot read {path}: {e.strerror}") from None
+    except ValueError:
+        raise JevError(f"{path} is not UTF-8 text") from None
+    for i, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
             d = json.loads(line)
-            if "state" not in d:
-                raise JevError(f"{path} line {i+1}: item has no 'state'")
-            d.setdefault("id", str(i)); d.setdefault("expected", {})
-            if not isinstance(d["expected"], dict):
-                raise JevError(f"{path} line {i+1}: 'expected' must be an object of question id to label")
-            items.append(d)
+        except ValueError as e:
+            raise JevError(f"{path} line {i}: not valid JSON ({e})") from None
+        if not isinstance(d, dict):
+            raise JevError(f"{path} line {i}: an item must be a JSON object")
+        if "state" not in d:
+            raise JevError(f"{path} line {i}: item has no 'state'")
+        d.setdefault("id", str(i)); d.setdefault("expected", {})
+        if not isinstance(d["expected"], dict):
+            raise JevError(f"{path} line {i}: 'expected' must be an object of question id to label")
+        items.append(d)
     return items
 
 
 def questions_of(qset):
     """Accept either {"questions": {...}, "model": ...} or a bare question map."""
     return qset["questions"] if "questions" in qset else qset
+
+
+def check_template(template):
+    """Refuse a batch template run_batched cannot use, before any request: a plain question set passed as one
+    would otherwise pass the label check and end in a KeyError traceback."""
+    missing = [k for k in ("array_field", "questions") if not isinstance(template, dict) or k not in template]
+    if missing:
+        raise JevError("a batch template needs " + " and ".join(f"'{k}'" for k in missing)
+                       + " (see references/batching.md); a plain question set goes to --questions")
 
 
 # ---------- runners ----------
@@ -206,6 +233,7 @@ def run_batched(items, template, n, model=None, sleep=0.05, key=None):
     the index, but a template that writes `[{j}]` cannot be used in keyed mode and is refused with a message."""
     if type(n) is not int or n <= 0:
         raise JevError("batch size must be a positive integer")
+    check_template(template)
     model = model or template.get("model", DEFAULT_MODEL)
     arr = template["array_field"]; pick = template.get("item_value"); shared = template.get("shared_state", {})
     if arr in shared:
@@ -270,18 +298,31 @@ def _label(v):
 
 
 LABEL_TYPES = ("choice", "noul", "score")
+CRITERIA_SHAPE = {"choice": (dict, "an object of option name to description"), "score": (list, "an array of levels")}
+
+
+def _kind(v):
+    """A JSON value's kind in words, for an error message."""
+    if isinstance(v, (dict, list)) and not v:
+        return "an empty " + ("object" if isinstance(v, dict) else "array")
+    return {dict: "an object", list: "an array", str: "a string", bool: "a boolean", type(None): "null"}.get(
+        type(v), "a number" if isinstance(v, (int, float)) else type(v).__name__)
 
 
 def question_defect(q):
-    """Why a question cannot be label-checked at all, or None. A misspelt `type` or a Choice/Score with no
-    `criteria` makes every label look wrong, so these are named as question-set faults rather than reported as
-    a file full of bad labels."""
+    """Why no request could carry this question and no label could be checked against it, or None: not an
+    object, a `type` that is not choice, noul or score, or `criteria` missing or of the wrong shape. The API
+    requires a Choice's criteria as an object of option name to description and a Score's as an array of levels;
+    given anything else every correct label reads as unlisted (or, for a Score, raises a TypeError), so these are
+    named as question-set faults rather than reported as a file full of bad labels."""
     if not isinstance(q, dict):
         return f"{_label(q) if isinstance(q, (str, int, float, bool, type(None))) else type(q).__name__} is not a question object"
     if q.get("type") not in LABEL_TYPES:
         return f"type {q.get('type')!r} is not one of " + ", ".join(LABEL_TYPES)
-    if q["type"] in ("choice", "score") and not q.get("criteria"):
-        return f"a {q['type']} question needs 'criteria'"
+    if q["type"] in CRITERIA_SHAPE:
+        shape, words = CRITERIA_SHAPE[q["type"]]; crit = q.get("criteria")
+        if not (isinstance(crit, shape) and crit):
+            return f"a {q['type']} question needs 'criteria', {words}" + ("" if crit is None else f", not {_kind(crit)}")
     return None
 
 
@@ -300,17 +341,47 @@ def valid_label(q, value):
     return False
 
 
+def accepts(q):
+    """What a label for question q must be, in words, so a refused label file says how to fix it."""
+    if q["type"] == "choice":
+        names = [_label(k) for k in q["criteria"]]
+        return "one of " + ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
+    if q["type"] == "noul":
+        return "JSON true or false"
+    return f"a number from 0 to {len(q['criteria']) - 1}"
+
+
+def _defects(qs, qids):
+    """[(qid, fault)] for the questions in qids that question_defect rejects."""
+    found = [(qid, question_defect(qs[qid])) for qid in qids]
+    return [(qid, why) for qid, why in found if why]
+
+
+def check_questions(qset):
+    """Refuse a question set no request could be built from, before any is sent, naming every faulty question,
+    labelled or not (question_defect). The scripts run this before check_labels, so a label file is never blamed
+    for a question's fault and an unlabelled malformed question is not sent to fail at the API."""
+    qs = questions_of(qset) if isinstance(qset, dict) else None
+    if not isinstance(qs, dict) or not qs:
+        raise JevError('no questions found: expected {"questions": {<id>: {...}}} or a map of question id to question')
+    broken = _defects(qs, list(qs))
+    if broken:
+        raise JevError("the question set is malformed; fix the questions, not the label file (no request was sent): "
+                       + "; ".join(f"{qid}: {why}" for qid, why in broken))
+
+
 def check_labels(items, qset, path=None):
     """Refuse a label file before any request is sent: every 'expected' value for a question in the set must
     satisfy valid_label. Keys for questions outside the set are ignored and an item may leave a question
-    unlabelled. Raises JevError naming the offending items, so a misspelt option or a string "false" costs no
-    API calls instead of a report annotation, a silently wrong rate, or a traceback after the whole run. A
-    question that can take no label at all is raised against the question set instead (question_defect)."""
-    qs = questions_of(qset); bad = []
+    unlabelled. Raises JevError naming the offending items and what each question takes, so a misspelt option or a
+    string "false" costs no API calls instead of a report annotation, a silently wrong rate, or a traceback after
+    the whole run. A question that can take no label at all is raised against the question set instead
+    (question_defect), and only for questions the file labels; check_questions covers the rest."""
+    qs = questions_of(qset); bad = []; offending = []
     # a question that can take no label at all would reject every item and read as a ruined label file; name the
     # question instead, and only for questions the file actually labels
     labelled = {qid for it in items if isinstance(it.get("expected"), dict) for qid in it["expected"]}
-    broken = [(qid, why) for qid in sorted(labelled & set(qs)) if (why := question_defect(qs[qid]))]
+    broken = _defects(qs, sorted(labelled & set(qs)))
     if broken:
         raise JevError("the question set cannot check these labels; fix the questions, not the label file: "
                        + "; ".join(f"{qid}: {why}" for qid, why in broken))
@@ -318,11 +389,26 @@ def check_labels(items, qset, path=None):
         exp = it.get("expected", {})
         if not isinstance(exp, dict):
             bad.append(f"{it.get('id')}: expected={_label(exp)} is not an object"); continue
-        bad.extend(f"{it.get('id')}: {qid}={_label(exp[qid])}" for qid, q in qs.items()
-                   if qid in exp and not valid_label(q, exp[qid]))
+        for qid, q in qs.items():
+            if qid in exp and not valid_label(q, exp[qid]):
+                bad.append(f"{it.get('id')}: {qid}={_label(exp[qid])}")
+                if qid not in offending:
+                    offending.append(qid)
     if bad:
         raise JevError((f"{path}: " if path else "") + f"{len(bad)} label(s) the question set cannot take; fix the "
-                       "label file (no request was sent): " + "; ".join(bad[:10]) + (" ..." if len(bad) > 10 else ""))
+                       "label file (no request was sent): " + "; ".join(bad[:10]) + (" ..." if len(bad) > 10 else "")
+                       + "".join(f". {qid} takes {accepts(qs[qid])}" for qid in offending))
+
+
+def load_labelled(paths, qset):
+    """Load every --items file and check the question set and each file's labels before any request is sent, so a
+    bad or missing second file is refused before the first is billed. Returns [(path, items)] in the order given.
+    eval.py, ablate.py and sweep_batch.py all start here."""
+    check_questions(qset)
+    loaded = [(p, load_items(p)) for p in paths]
+    for p, items in loaded:
+        check_labels(items, qset, p)
+    return loaded
 
 
 def lowest_recall(per_class):
@@ -478,14 +564,14 @@ def cell(r):
     return f"MAE {fmt(r['mae'])} within½ {r['within_half_level']}/{r['n']}"
 
 
-def worst_case(q, n, coarse=False):
+def worst_case(q, n, coarse=False, qid=None):
     """A report row for question q with every count at its maximum over n items, its longest option name and
     the largest MAE its rubric allows, so a script can measure a column before the first row prints rather
     than guess a width. coarse: whether the policy rolls this question up, which adds a count to a Choice cell.
     A question no report row can come from raises JevError, so the script exits with a message naming it."""
     why = question_defect(q)
     if why:
-        raise JevError(f"cannot size a report column for this question: {why}")
+        raise JevError(f"cannot size a report column for {qid or 'this question'}: {why}")
     crit = q.get("criteria") or {}
     if q["type"] == "choice":
         longest = max((str(k) for k in crit), key=len, default="")
@@ -553,3 +639,8 @@ def redact(text, key=None):
     for secret in sorted(secrets, key=len, reverse=True):
         text = text.replace(secret, "<redacted>")
     return re.sub(r"(?i)(Bearer\s+)[^\s\"',<>}\]]+", r"\1<redacted>", text)
+
+
+if __name__ == "__main__":   # `jevlib.py --help` says what this file is rather than printing nothing
+    print((__doc__ or "").strip() + "\n\nThis is the library the scripts share; it has no command line. Run eval.py, ablate.py,"
+          "\nsweep_batch.py or token_probe.py from this directory; each prints its usage with --help.")

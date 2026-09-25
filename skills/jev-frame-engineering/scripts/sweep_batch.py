@@ -56,22 +56,25 @@ def main():
     ap.add_argument("--sizes", default="1,4,8,12,16,20"); ap.add_argument("--policy"); ap.add_argument("--model")
     ap.add_argument("--sleep", type=float, default=0.05); ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
-    tpl = J.load_json(a.batch_template); policy = J.load_json(a.policy) if a.policy else {}
-    sizes = [int(s) for s in a.sizes.split(",") if s]
+    try:
+        sizes = [int(s) for s in a.sizes.split(",") if s]
+    except ValueError:
+        sizes = []
     if not sizes or any(n < 1 for n in sizes):
         ap.error("--sizes must contain positive integers")
-    tq = tpl["questions"]; qids = list(tq)
     try:
-        items = []
-        for p in a.items:   # every label is checked against the template before the first billed request
-            loaded = J.load_items(p); J.check_labels(loaded, tpl, p); items.extend(loaded)
+        tpl = J.load_json(a.batch_template); policy = J.load_json(a.policy) if a.policy else {}
+        J.check_template(tpl)
+        # every file is concatenated into one sweep, after the template and every label are checked
+        items = [it for _, loaded in J.load_labelled(a.items, tpl) for it in loaded]
+        tq = tpl["questions"]; qids = list(tq)
         print(f"{len(items)} items; questions per item: {len(qids)} ({', '.join(qids)})")
         if any(isinstance(tq[q], dict) and tq[q].get("type") == "choice" for q in qids):   # only Choice cells print it
             print("low = the Choice option with the lowest recall, hits/labelled; an option's recall falling is flagged even when fine holds")
         # one column width per question: the widest cell its own type can print for this many items (every
         # count at its maximum, its longest option name, the largest MAE on its rubric) or the no-answers
         # note, measured rather than guessed so the columns after it stay aligned
-        W = {q: max(len(J.cell(J.worst_case(tq[q], len(items), bool(policy.get(q, {}).get("parents"))))), len("(no scored answers)"))
+        W = {q: max(len(J.cell(J.worst_case(tq[q], len(items), bool(policy.get(q, {}).get("parents")), q))), len("(no scored answers)"))
              for q in qids}
         print(f"{'N':>3} {'q/req':>5} " + " ".join(f"{q[:W[q]]:<{W[q]}}" for q in qids)
               + f" {'Q1 acc':>6} {'Q4 acc':>6} {'Q4 conf':>7} {'tok/item':>8} {'ms/item':>7} {'requests':>8}")
