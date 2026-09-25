@@ -685,6 +685,34 @@ class ReportingBehavior(unittest.TestCase):
                     self.assertIn(fragment, err)
                     self.assertNotIn("Traceback", err)
 
+    def test_the_published_fixture_runs_through_every_script(self):
+        # tests/fixtures/support-triage holds the files SKILL.md's measurements were taken on; the fixture README's
+        # commands must keep passing every check the scripts make before they spend anything
+        E = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "support-triage")
+        f = {name: os.path.join(E, name) for name in ("questions.json", "batch-template.json", "policy.json", "dev.jsonl", "val.jsonl")}
+
+        def first_option(state, questions, model, key):
+            return response({qid: {"type": "choice", "choice": next(iter(q["criteria"])), "confidence": 0.9, "probabilities": {}}
+                             if q["type"] == "choice" else {"type": "noul", "noul": 0.2} for qid, q in questions.items()}), 100
+        runs = (["eval.py", "--questions", f["questions.json"], "--items", f["dev.jsonl"], "--items", f["val.jsonl"], "--policy", f["policy.json"], "--verbose"],
+                ["eval.py", "--questions", f["questions.json"], "--items", f["val.jsonl"], "--policy", f["policy.json"], "--permute-options"],
+                ["eval.py", "--batch-template", f["batch-template.json"], "--batch-size", "8", "--items", f["val.jsonl"], "--policy", f["policy.json"]],
+                ["ablate.py", "--questions", f["questions.json"], "--question", "queue", "--items", f["dev.jsonl"], "--items", f["val.jsonl"],
+                 "--policy", f["policy.json"]],
+                ["sweep_batch.py", "--batch-template", f["batch-template.json"], "--items", f["dev.jsonl"], "--policy", f["policy.json"],
+                 "--sizes", "1,5,10,17,25"])
+        outs = []
+        for argv in runs:
+            with self.subTest(argv=argv[:2]):
+                code, out, err, call = self.run_script(argv + ["--sleep", "0"], first_option)
+                self.assertIsNone(code, err)
+                self.assertEqual(err, "")
+                self.assertGreater(call.call_count, 0)
+                outs.append(out)
+        _, rows = self.table(outs[3])   # queue carries all four descriptive fields, so every ablation row is there
+        self.assertEqual([r.split(" fine")[0].strip() for r in rows],
+                         ["full", "minus not_for", "minus examples", "minus notes", "minus inspect", "minus all"])
+
     def test_ablate_reads_a_question_named_questions_as_a_question(self):
         # ablate wraps its target question itself; unwrapped, an id of "questions" was read as the wrapper, so its
         # labels went unchecked and the request carried the question's fields as questions

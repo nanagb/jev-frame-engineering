@@ -27,9 +27,11 @@ optimizations as hypotheses to test on the application's data. The scripts are e
 not a production SDK or proof of model performance.
 
 Where a rule below cites a measurement, it was taken on a synthetic support-triage fixture of
-50 labelled tickets against `jev-1.13.0` on 2026-09-20 with three repeats per condition. That
-fixture is not bundled and is too small to establish production thresholds: the numbers
-illustrate the method, and claims beyond them are hypotheses for your data. The
+50 labelled tickets against `jev-1.13.0` on 2026-09-20 with three repeats per condition. The
+fixture is published in this skill's repository under `tests/fixtures/support-triage/`, with the
+commands that reproduce each number, but is not installed with the skill. It is too small to
+establish production thresholds: the numbers illustrate the method, and claims beyond them are
+hypotheses for your data. The
 [authoritative references](#authoritative-references) at the end are the API contract.
 
 ## 1. Measure before changing the request

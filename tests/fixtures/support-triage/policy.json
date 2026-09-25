@@ -1,0 +1,18 @@
+{
+ "queue": {
+  "threshold": 0.75,
+  "parents": {
+   "billing": "money",
+   "sales": "money",
+   "technical": "product",
+   "account_access": "product",
+   "other": "other"
+  }
+ },
+ "urgent": {
+  "threshold": 0.8
+ },
+ "contains_secret": {
+  "threshold": 0.8
+ }
+}

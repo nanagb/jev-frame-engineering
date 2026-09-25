@@ -302,7 +302,9 @@ runs without a key.
 ### Accuracy and evidence
 
 Measurements cited in the skill were taken on a synthetic support-triage fixture of 50 labelled
-tickets, not included here, against `jev-1.13.0` on 2026-09-20 with three repeats per condition.
+tickets against `jev-1.13.0` on 2026-09-20 with three repeats per condition. The fixture is in
+[`tests/fixtures/support-triage/`](tests/fixtures/support-triage/README.md) with the commands that
+reproduce each number; it is published with the repository but not installed with the skill.
 Performance claims beyond that fixture are hypotheses to evaluate on your own data. Offline
 tests in `tests/` verify helper behavior, not live model quality; they are published with the
 repository but are not part of the skill.

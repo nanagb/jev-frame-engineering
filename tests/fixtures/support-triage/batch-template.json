@@ -1,0 +1,57 @@
+{
+ "model": "jev-1.13.0",
+ "array_field": "messages",
+ "item_value": "message",
+ "reference": "keyed",
+ "shared_state": {
+  "queues": {
+   "billing": {
+    "what": "Charges, invoices, refunds, subscription price or plan changes, payment failures"
+   },
+   "technical": {
+    "what": "The product misbehaves: errors, crashes, wrong output, slowness, an integration or API not working"
+   },
+   "account_access": {
+    "what": "Cannot sign in, locked out, password or two-factor problems, changing the email on the account"
+   },
+   "sales": {
+    "what": "A prospective or current customer asking about plans, pricing tiers, quotes, trials, or whether the product can do something before buying"
+   },
+   "other": {
+    "what": "None of the above: spam, feedback with no request, partnership or press enquiries, unrelated messages"
+   }
+  }
+ },
+ "questions": {
+  "queue": {
+   "type": "choice",
+   "instructions": {
+    "inspect": "{ref}",
+    "question": "The support ticket at `{ref}`: which queue should handle it, using the definitions in `queues`, judged from the message alone?"
+   },
+   "criteria": {
+    "billing": "as defined in `queues.billing`",
+    "technical": "as defined in `queues.technical`",
+    "account_access": "as defined in `queues.account_access`",
+    "sales": "as defined in `queues.sales`",
+    "other": "as defined in `queues.other`"
+   }
+  },
+  "urgent": {
+   "type": "noul",
+   "instructions": "Does the ticket at `{ref}` say or clearly imply that the sender needs attention today: an ongoing outage or a whole team blocked, a same-day deadline, money leaving the account right now, locked out of a live system, or a security exposure or data leak?",
+   "criteria": {
+    "true": "an ongoing outage, a same-day deadline, money leaving now, locked out of something live, or a security exposure or data leak",
+    "false": "a routine request, a question, feedback, a decision with a horizon of days, or a problem the sender is living with"
+   }
+  },
+  "contains_secret": {
+   "type": "noul",
+   "instructions": "Does the ticket at `{ref}` contain a credential or secret that should be redacted before the ticket is stored: a password, an API key or token, a full card number, or a one-time code?",
+   "criteria": {
+    "true": "an actual secret value appears in the text",
+    "false": "secrets are mentioned but no value is present"
+   }
+  }
+ }
+}

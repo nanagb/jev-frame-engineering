@@ -1,0 +1,73 @@
+{
+ "model": "jev-1.13.0",
+ "questions": {
+  "queue": {
+   "type": "choice",
+   "instructions": {
+    "inspect": "message",
+    "question": "`message` is a support ticket. Which queue should handle it, judged from the message alone?",
+    "notes": [
+     "A message that mixes a bug with a billing complaint goes to the queue of the thing the sender asks to be done."
+    ]
+   },
+   "criteria": {
+    "billing": {
+     "what": "Charges, invoices, refunds, subscription price or plan changes, payment failures",
+     "not_for": "questions about plan features before buying (sales) or a login problem (account_access)",
+     "examples": [
+      "I was charged twice this month",
+      "please refund my last invoice"
+     ]
+    },
+    "technical": {
+     "what": "The product misbehaves: errors, crashes, wrong output, slowness, an integration or API not working",
+     "not_for": "cannot log in (account_access) or pricing questions (sales)",
+     "examples": [
+      "export fails with a 500 error",
+      "dashboard has been loading for minutes"
+     ]
+    },
+    "account_access": {
+     "what": "Cannot sign in, locked out, password or two-factor problems, changing the email on the account",
+     "not_for": "billing questions or bugs after a successful login",
+     "examples": [
+      "2FA codes never arrive",
+      "locked out after password reset"
+     ]
+    },
+    "sales": {
+     "what": "A prospective or current customer asking about plans, pricing tiers, quotes, trials, or whether the product can do something before buying",
+     "not_for": "an existing customer disputing a charge (billing)",
+     "examples": [
+      "do you offer an enterprise plan",
+      "can I get a quote for 50 seats"
+     ]
+    },
+    "other": {
+     "what": "None of the above: spam, feedback with no request, partnership or press enquiries, unrelated messages",
+     "not_for": "anything with a concrete request the other queues cover",
+     "examples": [
+      "love the new design!",
+      "would you like to sponsor our podcast"
+     ]
+    }
+   }
+  },
+  "urgent": {
+   "type": "noul",
+   "instructions": "Does `message` say or clearly imply that the sender needs attention today: an ongoing outage or a whole team blocked, a same-day deadline, money leaving the account right now, locked out of a live system, or a security exposure or data leak?",
+   "criteria": {
+    "true": "an ongoing outage, a same-day deadline, money leaving now, locked out of something live, or a security exposure or data leak",
+    "false": "a routine request, a question, feedback, a decision with a horizon of days, or a problem the sender is living with"
+   }
+  },
+  "contains_secret": {
+   "type": "noul",
+   "instructions": "Does `message` contain a credential or secret that should be redacted before the ticket is stored: a password, an API key or token, a full card number, or a one-time code?",
+   "criteria": {
+    "true": "an actual secret value appears in the text",
+    "false": "secrets are mentioned but no value is present"
+   }
+  }
+ }
+}
