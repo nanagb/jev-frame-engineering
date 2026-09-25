@@ -4,7 +4,7 @@ Client errors sanitize the active API key. Evaluation reports may contain raw in
 Errors are split into JevError (non-retryable request/configuration failure) and
 JevNoJudgment (no usable response; never substitute a model answer).
 """
-import json, math, os, re, statistics, sys, time, urllib.error, urllib.request
+import json, math, os, re, statistics, sys, time, unicodedata, urllib.error, urllib.request
 from collections import Counter
 from email.utils import parsedate_to_datetime
 
@@ -572,10 +572,22 @@ def fmt(x, nd=2):
     return "-" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
 
+def width(text):
+    """Terminal columns text takes: East Asian wide and fullwidth characters take two and combining marks none,
+    so an option named in Japanese does not push the table columns after it out of line."""
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text)
+
+
+def pad(text, w):
+    """text left-aligned in w terminal columns (see width)."""
+    return text + " " * max(0, w - width(text))
+
+
 def cell(r):
     """One scored question as a cell for the ablate.py and sweep_batch.py tables. Measure the column with
     cell(worst_case(q, n)) before the first row prints; counts are right-aligned to three digits so rows line
-    up while n holds, and the scripts ljust the cell to the measured width when it does not."""
+    up while n holds, and the scripts pad the cell to the measured width (pad) when it does not."""
     if r["type"] == "choice":
         return (f"fine {r['fine']:>3}/{r['n']} " + (f"coarse {r['coarse']:>3} " if r["coarse"] is not None else "")
                 + f"≥thr {r['pass']:>3}({r['pass_correct']:>3}) conf {fmt(r['mean_conf'])}" + fmt_low(r.get("lowest_recall")))
@@ -595,7 +607,7 @@ def worst_case(q, n, coarse=False, qid=None):
         raise JevError(f"cannot size a report column for {qid or 'this question'}: {why}")
     crit = q.get("criteria") or {}
     if q["type"] == "choice":
-        longest = max((str(k) for k in crit), key=len, default="")
+        longest = max((str(k) for k in crit), key=width, default="")
         return {"type": "choice", "fine": n, "n": n, "coarse": n if coarse else None, "pass": n, "pass_correct": n,
                 "mean_conf": 1.0, "lowest_recall": {"label": longest, "hits": n, "n": n, "recall": 1.0}}
     if q["type"] == "noul":

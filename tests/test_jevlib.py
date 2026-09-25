@@ -601,6 +601,91 @@ class ReportingBehavior(unittest.TestCase):
         self.assertIn("no scored answers (failed 30/30)", out.getvalue())
         self.assertNotIn("MAE 0.00", out.getvalue())
 
+    @staticmethod
+    def single_fake(truth=lambda message: "billing" if "charged" in message else "technical", fail=lambda state, questions: False):
+        """Answers single-item requests: every Choice right by truth(message) (the fixture's billing tickets say
+        "charged twice"), every Noul 0.2, and requests fail(state, questions) says to raise."""
+        def fake_post(state, questions, model, key):
+            if fail(state, questions):
+                raise J.JevNoJudgment("timed out")
+            return response({qid: {"type": "choice", "choice": truth(state["message"]), "confidence": 0.9,
+                                   "probabilities": {k: 1 / len(q["criteria"]) for k in q["criteria"]}}
+                             if q["type"] == "choice" else {"type": "noul", "noul": 0.2}
+                             for qid, q in questions.items()}), 100
+        return fake_post
+
+    @staticmethod
+    def table(out):
+        """ablate's header and variant rows."""
+        lines = out.splitlines()
+        return next(l for l in lines if l.startswith("variant")), [l for l in lines if l.startswith(("full", "minus"))]
+
+    def test_ablate_bills_each_distinct_variant_once(self):
+        # a field named twice is one variant, and with one field present "minus all" is that field's request again;
+        # each used to be a full billed pass over every set
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            argv = ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", fx["dev.jsonl"],
+                    "--fields", "not_for,not_for,absent_field", "--sleep", "0"]
+            code, out, _, call = self.run_script(argv, self.single_fake())
+        self.assertIsNone(code)
+        _, rows = self.table(out)
+        self.assertEqual([r.split(" fine")[0].strip() for r in rows], ["full", "minus not_for"])
+        self.assertEqual(call.call_count, 2 * 30)
+        self.assertIn("note: queue has no absent_field", out)
+
+    def test_ablate_shows_no_token_mean_over_a_different_mix_of_sets(self):
+        # every val request fails once billing's examples are removed; a mean over dev alone would be compared with
+        # the full row's mean over dev and val, and could reverse the sign of a saving
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d); val = os.path.join(d, "val.jsonl")
+            with open(val, "w") as f:
+                for i in range(10):
+                    f.write(json.dumps({"id": f"v{i}", "state": {"message": f"val: charged {i}"}, "expected": {"queue": "billing"}}) + "\n")
+            fail = lambda state, qs: state["message"].startswith("val") and "examples" not in qs["queue"]["criteria"]["billing"]
+            argv = ["ablate.py", "--questions", fx["questions.json"], "--question", "queue", "--items", fx["dev.jsonl"],
+                    "--items", val, "--fields", "examples", "--sleep", "0"]
+            code, out, _, _ = self.run_script(argv, self.single_fake(fail=fail))
+        self.assertIsNone(code)
+        _, (full, minus) = self.table(out)
+        self.assertTrue(full.endswith("   100"), full)
+        self.assertIn("no scored answers (failed 10/10)", minus)
+        self.assertTrue(minus.endswith("     -"), minus)
+
+    def test_ablate_names_sets_that_share_a_file_name_by_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d); paths = []
+            for sub in ("a", "b"):
+                os.makedirs(os.path.join(d, sub)); paths.append(os.path.join(d, sub, "dev.jsonl"))
+                with open(fx["dev.jsonl"]) as src, open(paths[-1], "w") as dst:
+                    dst.write(src.read())
+            argv = ["ablate.py", "--questions", fx["questions.json"], "--question", "queue",
+                    "--items", paths[0], "--items", paths[1], "--fields", "not_for", "--sleep", "0"]
+            code, out, _, _ = self.run_script(argv, self.single_fake())
+        self.assertIsNone(code)
+        header, _ = self.table(out)
+        self.assertIn(paths[0], header); self.assertIn(paths[1], header)
+
+    def test_ablate_columns_line_up_with_wide_option_names(self):
+        # the low readout names the option; measured with len(), a Japanese name pushed the tokens/item column right
+        with tempfile.TemporaryDirectory() as d:
+            qpath = os.path.join(d, "q.json"); items = os.path.join(d, "items.jsonl")
+            with open(qpath, "w") as f:
+                json.dump({"questions": {"queue": {"type": "choice", "instructions": "Which queue handles `message`?",
+                                                   "criteria": {"請求": {"what": "charges", "not_for": "sales"}, "技術": {"what": "faults"}}}}}, f)
+            with open(items, "w") as f:
+                for i in range(4):
+                    f.write(json.dumps({"id": str(i), "state": {"message": "charged" if i % 2 else "broken"},
+                                        "expected": {"queue": "請求" if i % 2 else "技術"}}, ensure_ascii=False) + "\n")
+            argv = ["ablate.py", "--questions", qpath, "--question", "queue", "--items", items, "--fields", "not_for", "--sleep", "0"]
+            code, out, _, _ = self.run_script(argv, self.single_fake(truth=lambda m: "請求" if m == "charged" else "技術"))
+        self.assertIsNone(code)
+        header, rows = self.table(out)
+        self.assertIn("low 技術 2/2", rows[0])
+        edge = J.width(header[:-len("  tokens/item")])
+        for row in rows:
+            self.assertEqual(J.width(row[:-8]), edge, row)   # each row ends with two spaces and a 6-wide tokens field
+
 
 class ScriptHygiene(unittest.TestCase):
     def test_scripts_parse_as_python_3_7(self):

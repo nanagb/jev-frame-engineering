@@ -423,6 +423,17 @@ class TableCells(unittest.TestCase):
         self.assertGreaterEqual(len(noul), len(J.cell({"type": "noul", "caught": 30, "positives": 30, "false_positives": 30,
                                                        "negatives": 30, "lowest_true": None, "highest_false": None})))
 
+    def test_width_counts_terminal_columns(self):
+        # a Japanese option name takes two columns per character; measured with len() it pushed every column
+        # after it out of line
+        self.assertEqual((J.width("abc"), J.width("請求"), J.width("é"), J.width("≥thr ½")), (3, 4, 1, 6))
+        self.assertEqual(J.pad("請求", 6), "請求  ")
+        self.assertEqual(J.pad("toolong", 3), "toolong")
+        wide = {"type": "choice", "criteria": {"請求書の再発行": "r", "billing_dispute": "d"}}
+        real = {"type": "choice", "fine": 5, "n": 30, "coarse": None, "pass": 30, "pass_correct": 5, "mean_conf": 1.0,
+                "lowest_recall": {"label": "請求書の再発行", "hits": 0, "n": 30, "recall": 0.0}}
+        self.assertGreaterEqual(J.width(J.cell(J.worst_case(wide, 30))), J.width(J.cell(real)))
+
     def test_cells_format_none_through_fmt(self):
         self.assertEqual(J.cell({"type": "score", "mae": None, "within_half_level": 0, "n": 2}), "MAE - within½ 0/2")
         self.assertIn("margin -/-", J.cell({"type": "noul", "caught": 0, "positives": 0, "false_positives": 0, "negatives": 0,
