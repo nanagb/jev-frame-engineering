@@ -31,7 +31,7 @@ def report_permutation(base, perm, qset, policy):
     for qid, q in J.questions_of(qset).items():
         if q.get("type") != "choice":
             continue
-        thr = (policy or {}).get(qid, {}).get("threshold", 0.75)
+        thr = J.threshold(policy, qid, "choice")
         pairs = [(x, x["answers"][qid], y["answers"][qid]) for x, y in zip(base, perm)
                  if x.get("answers") and y.get("answers") and qid in x["answers"] and qid in y["answers"]]
         if not pairs:

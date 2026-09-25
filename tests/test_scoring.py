@@ -48,12 +48,46 @@ class SixRows(unittest.TestCase):
 class ChoiceScoring(SixRows):
     def test_per_class(self):
         q = self.rep["questions"]["queue"]; pc = q["per_class"]
-        self.assertEqual(pc["a"], {"n": 3, "hits": 3, "recall": 1.0, "predicted": 4, "precision": 0.75})
-        self.assertEqual(pc["b"], {"n": 2, "hits": 1, "recall": 0.5, "predicted": 1, "precision": 1.0})
+        self.assertEqual(pc["a"], {"n": 3, "hits": 3, "recall": 1.0, "predicted": 4, "precision": 0.75,
+                                   "pass": 4, "pass_correct": 3, "recall_at_thr": 1.0, "precision_at_thr": 0.75})
+        self.assertEqual(pc["b"], {"n": 2, "hits": 1, "recall": 0.5, "predicted": 1, "precision": 1.0,
+                                   "pass": 1, "pass_correct": 1, "recall_at_thr": 0.5, "precision_at_thr": 1.0})
         self.assertEqual(pc["c"]["recall"], 0.0)
         self.assertEqual(pc["c"]["precision"], 0.0)
         self.assertEqual(q["fine"], 4)
         self.assertEqual(q["lowest_recall"], {"label": "c", "hits": 0, "n": 1, "recall": 0.0})
+
+    def test_per_class_at_the_threshold(self):
+        # the rates an automatic action at the threshold achieves: a class answered right at low confidence has full
+        # recall over all answers and none at the threshold, which is the figure to report for an automated route
+        res = [row(0, "a", "a", True, 0.9, conf=0.6), row(1, "a", "a", True, 0.9, conf=0.6),
+               row(2, "b", "b", True, 0.9, conf=0.95), row(3, "c", "b", True, 0.9, conf=0.8)]
+        rep = J.score(res, QSET, {"queue": {"threshold": 0.75}}); pc = rep["questions"]["queue"]["per_class"]
+        self.assertEqual((pc["a"]["recall"], pc["a"]["recall_at_thr"], pc["a"]["pass"]), (1.0, 0.0, 0))
+        self.assertIsNone(pc["a"]["precision_at_thr"])
+        self.assertEqual((pc["b"]["pass"], pc["b"]["pass_correct"], pc["b"]["precision_at_thr"]), (2, 1, 0.5))
+        out = report_text(rep)
+        self.assertIn("≥0.75 recall        a 0/2  b 1/1  c 0/1", out)
+        self.assertIn("≥0.75 precision     a -  b 1/2  c -", out)
+
+    def test_an_unlisted_label_equal_to_the_answer_is_not_a_hit(self):
+        # re-scoring a dump after option "gone" was removed: the answer equals the label, but the label is not an
+        # option, so it is a miss in fine, pass_correct, the buckets and the miss list, and fine never exceeds coarse
+        policy = {"queue": {"parents": {"a": "p", "b": "p"}}}
+        res = [row(i, "gone", "gone", True, 0.9) for i in range(3)] + [row(3, "a", "a", True, 0.9), row(4, "a", "b", True, 0.9)]
+        q = J.score(res, QSET, policy)["questions"]["queue"]
+        self.assertEqual((q["fine"], q["coarse"], q["pass_correct"]), (1, 2, 1))
+        self.assertEqual(q["buckets"][0]["acc"], 0.2)
+        self.assertEqual([m["id"] for m in q["misses"]], ["0", "1", "2", "4"])
+        self.assertEqual(q["unlisted"], {'"gone"': 3})
+
+    def test_a_question_map_without_criteria_still_scores(self):
+        # score() is also run on rows from elsewhere; a question map stripped of criteria (the API requires them, so
+        # the answers came from a fuller question) once raised KeyError here. The options are the labels seen
+        q = J.score([row(0, "a", "a", True, 0.9), row(1, "b", "a", False, 0.2)],
+                    {"queue": {"type": "choice"}, "flag": {"type": "noul"}})["questions"]["queue"]
+        self.assertEqual((q["fine"], q["n"], q["unlisted"]), (1, 2, {}))
+        self.assertEqual(list(q["per_class"]), ["a", "b"])
 
     def test_unseen_option_has_none_recall_and_precision(self):
         pc = J.score([row(0, "a", "a", True, 0.9)], QSET)["questions"]["queue"]["per_class"]
@@ -84,7 +118,7 @@ class ChoiceScoring(SixRows):
         res = [row(0, None, "a", True, 0.9), row(1, "zzz", "a", True, 0.9), row(2, ["x"], "a", True, 0.9)]
         rep = J.score(res, QSET); q = rep["questions"]["queue"]
         self.assertEqual((q["fine"], len(q["misses"])), (0, 3))
-        self.assertEqual(q["per_class"]["a"]["predicted"], 3)
+        self.assertEqual(q["per_class"]["a"]["predicted"], 0)   # an answer on an unlisted label joins no class either
         self.assertEqual(sum(c["n"] for c in q["per_class"].values()), 0)
         self.assertEqual(q["unlisted"], {'"zzz"': 1, '["x"]': 1, "null": 1})
         out = report_text(rep, verbose=True)
@@ -122,13 +156,15 @@ class ChoiceScoring(SixRows):
         self.assertEqual(J.fmt_low({"label": "technical", "hits": 2, "n": 3, "recall": 2 / 3}), " low technical 2/3")
         self.assertEqual(J.fmt_low({"label": "billing_dispute", "hits": 0, "n": 6, "recall": 0.0}), " low billing_dispute 0/6")
         self.assertIsNone(J.lowest_recall({"a": {"n": 0, "hits": 0, "recall": None, "predicted": 2, "precision": 0.0}}))
-        tie = {"b": {"n": 2, "hits": 1, "recall": 0.5, "predicted": 1, "precision": 1.0},
-               "a": {"n": 4, "hits": 2, "recall": 0.5, "predicted": 2, "precision": 1.0}}
-        self.assertEqual(J.lowest_recall(tie)["label"], "b")   # a recall tie goes to the least support, not the name
-        # a one-item class at full recall is the fragile one; it must headline over a large stable class
-        stable = {"account": {"n": 30, "hits": 30, "recall": 1.0, "predicted": 30, "precision": 1.0},
-                  "zzz_rare": {"n": 1, "hits": 1, "recall": 1.0, "predicted": 1, "precision": 1.0}}
-        self.assertEqual(J.lowest_recall(stable), {"label": "zzz_rare", "hits": 1, "n": 1, "recall": 1.0})
+        c = lambda hits, n: {"n": n, "hits": hits, "recall": hits / n, "predicted": n, "precision": 1.0}
+        # a recall tie goes to the option with more labelled items, which has lost more of them, not to the name
+        self.assertEqual(J.lowest_recall({"b": c(1, 2), "a": c(2, 4)})["label"], "a")
+        self.assertEqual(J.lowest_recall({"billing": c(5, 10), "other": c(1, 2)})["label"], "billing")
+        # an always-missed one-item class must not hide a ten-item class that collapsed beside it: ablate.py has no
+        # flags, so this readout is the only place the collapse shows
+        collapse = {"billing": c(0, 10), "technical": c(19, 19), "other": c(0, 1)}
+        self.assertEqual(J.lowest_recall(collapse), {"label": "billing", "hits": 0, "n": 10, "recall": 0.0})
+        self.assertEqual(J.lowest_recall({"account": c(30, 30), "rare": c(1, 1)})["label"], "account")
         same = {"a": {"n": 2, "hits": 1, "recall": 0.5, "predicted": 1, "precision": 1.0},
                 "b": {"n": 2, "hits": 1, "recall": 0.5, "predicted": 1, "precision": 1.0}}
         self.assertEqual(J.lowest_recall(same)["label"], "a")   # then the name, so the pick is stable
@@ -192,6 +228,14 @@ class ScoreScoring(unittest.TestCase):
     def test_all_labels_invalid_reports_no_error_rather_than_zero(self):
         q = J.score([self.srow(0, None, 1.0)], self.QSET)["questions"]["sev"]
         self.assertIsNone(q["mae"]); self.assertEqual(q["within_half_level"], 0)
+
+    def test_a_rubric_without_criteria_still_scores(self):
+        # without criteria every level used to read as unlisted (MAE None, within 0/3); a label is then checked as a
+        # number alone, as it was before labels were validated
+        res = [self.srow(0, 1, 1.2), self.srow(1, 2, 1.9), self.srow(2, 0, 0.1)]
+        q = J.score(res, {"sev": {"type": "score"}})["questions"]["sev"]
+        self.assertAlmostEqual(q["mae"], 0.4 / 3)
+        self.assertEqual((q["within_half_level"], q["unlisted"]), (3, {}))
 
 
 class LabelCheck(unittest.TestCase):

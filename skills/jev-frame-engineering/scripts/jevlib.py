@@ -13,6 +13,7 @@ DEFAULT_MODEL = "jev-1.13.0"          # pinned; aliases (jev-latest) move betwee
 PRICE_PER_MTOK = 0.042                # jev-1.13.0, checked 2026-09-20; output free
 PRICES_PER_MTOK = {DEFAULT_MODEL: PRICE_PER_MTOK}
 BUCKETS = [0.9, 0.75, 0.6, 0.0]
+THRESHOLDS = {"choice": 0.75, "noul": 0.8}   # policy defaults when a question has no "threshold"
 
 
 class JevError(Exception):
@@ -330,15 +331,22 @@ def valid_label(q, value):
     """Whether a label-file value is one the question can answer with (eval-protocol.md section 1): an option
     name for Choice, a JSON boolean for Noul, a rubric position for Score. Anything else (null, a list, the
     string "false", a misspelt option, a level off the rubric) is a label-file error, never a model miss.
-    A question question_defect() rejects can take no label at all; check_labels names that fault separately."""
-    typ = q.get("type"); crit = q.get("criteria") or {}
+    check_labels names a question question_defect() rejects before asking; score() may be handed a question map
+    stripped of its criteria (the API requires them, so the answers came from a fuller question), and then a
+    label is checked by its type alone."""
+    typ = q.get("type"); crit = q.get("criteria")
     if typ == "choice":
-        return isinstance(value, str) and value in crit
+        return isinstance(value, str) and (value in crit if isinstance(crit, dict) and crit else True)
     if typ == "noul":
         return isinstance(value, bool)
     if typ == "score":
-        return _number(value, 0, len(crit) - 1)
+        return _number(value, 0, len(crit) - 1 if isinstance(crit, list) and crit else float("inf"))
     return False
+
+
+def threshold(policy, qid, typ):
+    """The policy threshold for question qid, or the default for its type (THRESHOLDS)."""
+    return (policy or {}).get(qid, {}).get("threshold", THRESHOLDS[typ])
 
 
 def accepts(q):
@@ -414,11 +422,13 @@ def load_labelled(paths, qset):
 def lowest_recall(per_class):
     """The Choice option with the lowest recall among those with labelled support, or None.
     ablate.py and sweep_batch.py headline it because overall accuracy can hold while one class collapses.
-    A recall tie goes to the option with the least support, the class most likely to collapse next."""
+    A recall tie goes to the option with more labelled items, which at the same recall has lost more of them:
+    a ten-item class at 0/10 headlines over an always-missed one-item class at 0/1, which would otherwise hide
+    the collapse from ablate.py, where this is the only per-class readout."""
     supported = {lab: c for lab, c in (per_class or {}).items() if c["n"]}
     if not supported:
         return None
-    lab = min(supported, key=lambda k: (supported[k]["recall"], supported[k]["n"], k))   # then the name, so the pick is stable
+    lab = min(supported, key=lambda k: (supported[k]["recall"], -supported[k]["n"], k))   # then the name, so the pick is stable
     c = supported[lab]
     return {"label": lab, "hits": c["hits"], "n": c["n"], "recall": c["recall"]}
 
@@ -454,10 +464,11 @@ def score(results, qset, policy=None):
         good = lambda r: valid_label(q, r["expected"][qid])
         unlisted = dict(sorted(Counter(_label(r["expected"][qid]) for r in rows if not good(r)).items()))
         if typ == "choice":
-            thr = pol.get("threshold", 0.75); parents = pol.get("parents", {})
-            options = list(q["criteria"])
+            thr = threshold(policy, qid, "choice"); parents = pol.get("parents", {})
             pairs = [(r, r["answers"][qid]) for r in rows]
-            hit = lambda r, a: a["choice"] == r["expected"][qid]   # an invalid label never equals an option name
+            # a label the question cannot take is never a hit, even when the answer equals it (a dump re-scored after
+            # the option was removed): unguarded it counted in fine, the buckets and pass_correct while coarse missed it
+            hit = lambda r, a: good(r) and a["choice"] == r["expected"][qid]
             fine = sum(hit(r, a) for r, a in pairs)
             roll = lambda lab: parents.get(lab, lab)
             # a label the question cannot take is a coarse miss, like a fine one, and `good` short-circuits before
@@ -482,17 +493,27 @@ def score(results, qset, policy=None):
                           and quarter * r["batch_len"] / 4 <= r["pos"] < (quarter + 1) * r["batch_len"] / 4]
                     by_pos.append({"quarter": quarter + 1, "n": len(qp), "acc": (sum(hit(r, a) for r, a in qp) / len(qp)) if qp else None,
                                    "mean_conf": _mean(a["confidence"] for _, a in qp)})
-            n_exp, n_pred, hits = Counter(), Counter(), Counter()   # one pass over the pairs
+            # one pass over the rows whose label the question can take: a row with an unlisted label joins no class,
+            # as a prediction or as a label, so precision and recall are computed over the same rows. pass counts the
+            # answers at or above the threshold, the ones an automatic action at that threshold would take
+            n_exp, n_pred, hits, n_pass, pass_hits = Counter(), Counter(), Counter(), Counter(), Counter()
             for r, a in pairs:
-                n_pred[a["choice"]] += 1
-                if good(r):
-                    e = r["expected"][qid]; n_exp[e] += 1
-                    if hit(r, a):
-                        hits[e] += 1
-            # one row per option, in production order; the client rejects an answer outside the option
-            # list before scoring, so only the label file can put a value outside it
-            per_class = {lab: {"n": n_exp[lab], "hits": hits[lab], "recall": (hits[lab] / n_exp[lab]) if n_exp[lab] else None,
-                               "predicted": n_pred[lab], "precision": (hits[lab] / n_pred[lab]) if n_pred[lab] else None}
+                if not good(r):
+                    continue
+                e = r["expected"][qid]; n_exp[e] += 1; n_pred[a["choice"]] += 1
+                accepted = a["confidence"] >= thr; n_pass[a["choice"]] += accepted
+                if hit(r, a):
+                    hits[e] += 1; pass_hits[e] += accepted
+            # one row per option, in production order; the client rejects an answer outside the option list
+            # before scoring, so only the label file can put a value outside it. A question map stripped of its
+            # criteria (see valid_label) takes its options from the labels and answers seen
+            crit = q.get("criteria")
+            options = list(crit) if isinstance(crit, dict) and crit else sorted(set(n_exp) | set(n_pred))
+            rate = lambda k, n: (k / n) if n else None
+            per_class = {lab: {"n": n_exp[lab], "hits": hits[lab], "recall": rate(hits[lab], n_exp[lab]),
+                               "predicted": n_pred[lab], "precision": rate(hits[lab], n_pred[lab]),
+                               "pass": n_pass[lab], "pass_correct": pass_hits[lab],
+                               "recall_at_thr": rate(pass_hits[lab], n_exp[lab]), "precision_at_thr": rate(pass_hits[lab], n_pass[lab])}
                          for lab in options}
             rep["questions"][qid] = {
                 "type": "choice", "n": len(pairs), "fine": fine, "coarse": coarse, "threshold": thr, "by_position": by_pos,
@@ -502,7 +523,7 @@ def score(results, qset, policy=None):
                 "misses": [{"id": r["id"], "subject": subject_of(r), "expected": r["expected"][qid], "got": a["choice"], "conf": round(a["confidence"], 2)}
                            for r, a in pairs if not hit(r, a)]}
         elif typ == "noul":
-            thr = pol.get("threshold", 0.8)
+            thr = threshold(policy, qid, "noul")
             pairs = [(r, r["answers"][qid]["noul"]) for r in rows]
             pos = [(r, p) for r, p in pairs if r["expected"][qid] is True]; neg = [(r, p) for r, p in pairs if r["expected"][qid] is False]
             caught = sum(p >= thr for _, p in pos); fp = sum(p >= thr for _, p in neg)
@@ -605,6 +626,10 @@ def print_report(title, rep, verbose=False):
             if pc:
                 print("      per-class recall    " + "  ".join(f"{lab} {c['hits']}/{c['n']}" if c["n"] else f"{lab} -" for lab, c in pc.items()))
                 print("      per-class precision " + "  ".join(f"{lab} {c['hits']}/{c['predicted']}" if c["predicted"] else f"{lab} -" for lab, c in pc.items()))
+                # the same rates counting only answers at or above the threshold: what an automatic action achieves
+                at = f"≥{q['threshold']}"
+                print(f"      {at + ' recall':<20}" + "  ".join(f"{lab} {c['pass_correct']}/{c['n']}" if c["n"] else f"{lab} -" for lab, c in pc.items()))
+                print(f"      {at + ' precision':<20}" + "  ".join(f"{lab} {c['pass_correct']}/{c['pass']}" if c["pass"] else f"{lab} -" for lab, c in pc.items()))
             _print_unlisted(q)
             if verbose:
                 if q.get("by_position"):

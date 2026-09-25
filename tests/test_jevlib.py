@@ -367,7 +367,8 @@ class ReportingBehavior(unittest.TestCase):
             with self.subTest(lost=lost):
                 lines = self.sweep_rows(self.routing_fake(lambda t, batch: len(batch) > 1 and t in lost))
                 self.assertEqual(len(lines), 2)
-                self.assertIn("fine  30/30", lines[0]); self.assertIn("low billing 2/2", lines[0]); self.assertNotIn("investigate", lines[0])
+                # at full recall everywhere the recall tie goes to the larger class
+                self.assertIn("fine  30/30", lines[0]); self.assertIn("low technical 28/28", lines[0]); self.assertNotIn("investigate", lines[0])
                 self.assertIn(fine, lines[1]); self.assertIn(low, lines[1])
                 (self.assertIn if flagged else self.assertNotIn)("investigate (heuristic): queue", lines[1])
 
