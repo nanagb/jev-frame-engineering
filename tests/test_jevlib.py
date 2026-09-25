@@ -340,23 +340,31 @@ class ReportingBehavior(unittest.TestCase):
         return [l for l in out.getvalue().splitlines() if re.match(r"^\s*\d+\s+(\d+|-)\s", l)]   # size rows: N, q/req, cells
 
     @staticmethod
-    def routing_fake(misroute):
-        """Answers every ticket by its text (the fixture writes 'billing ticket N' for billing) and misroutes the tickets
-        misroute(ticket, batch) says to, so a test controls the outcome by ticket and batch size, not by batch order."""
+    def scripted_fake(wrong=lambda ticket, batch: False, fail=lambda batch: False, conf=lambda ticket, batch: 0.9):
+        """Answers every ticket by its text (the fixture writes 'billing ticket N' for billing), gets wrong the tickets
+        wrong(ticket, batch) names, answers at conf(ticket, batch), and fails the requests fail(batch) names, so a test
+        controls the outcome by ticket and batch size, not by batch order. Nouls answer 0.2 and Scores 1.0."""
         def fake_post(state, questions, model, key):
             tickets = state["messages"]   # keyed mode: an object in item order; quoted/index: a list
             tickets = list(tickets.values()) if isinstance(tickets, dict) else tickets
+            if fail(tickets):
+                raise J.JevNoJudgment("timed out")
             answers = {}
             for qid, q in questions.items():
-                if q["type"] == "noul":
-                    answers[qid] = {"type": "noul", "noul": 0.2}; continue
+                if q["type"] != "choice":
+                    answers[qid] = {"type": "noul", "noul": 0.2} if q["type"] == "noul" else {"type": "score", "score": 1.0}
+                    continue
                 ticket = tickets[int(qid.rsplit("__", 1)[1])]   # run_batched asks each question once per item, as qid__j
                 truth = "billing" if ticket.startswith("billing") else "technical"
-                choice = "technical" if truth == "billing" and misroute(ticket, tickets) else truth
-                answers[qid] = {"type": "choice", "choice": choice, "confidence": 0.9,
+                choice = {"billing": "technical", "technical": "billing"}[truth] if wrong(ticket, tickets) else truth
+                answers[qid] = {"type": "choice", "choice": choice, "confidence": conf(ticket, tickets),
                                 "probabilities": {k: (0.9 if k == choice else 0.1) for k in q["criteria"]}}
             return response(answers), 120
         return fake_post
+
+    def routing_fake(self, misroute):
+        """scripted_fake that misroutes the billing tickets misroute(ticket, batch) names to technical."""
+        return self.scripted_fake(wrong=lambda t, batch: t.startswith("billing") and misroute(t, batch))
 
     def test_sweep_flags_a_rare_class_collapse_that_fine_hides(self):
         # 28 technical + 2 billing. Once a request carries more than one ticket the fake misroutes billing tickets to
@@ -370,7 +378,7 @@ class ReportingBehavior(unittest.TestCase):
                 # at full recall everywhere the recall tie goes to the larger class
                 self.assertIn("fine  30/30", lines[0]); self.assertIn("low technical 28/28", lines[0]); self.assertNotIn("investigate", lines[0])
                 self.assertIn(fine, lines[1]); self.assertIn(low, lines[1])
-                (self.assertIn if flagged else self.assertNotIn)("investigate (heuristic): queue", lines[1])
+                (self.assertIn if flagged else self.assertNotIn)("investigate (heuristic): queue (billing recall)", lines[1])
 
     def test_sweep_does_not_read_a_failed_batch_as_an_accuracy_drop(self):
         # one batch of 8 times out at N=8: the scored rows are still all right (22/22), so nothing may flag even
@@ -386,62 +394,116 @@ class ReportingBehavior(unittest.TestCase):
         self.assertIn("fine  22/22", lines[1]); self.assertIn("failed 8/30", lines[1])
         self.assertNotIn("investigate", lines[1])
 
+    def test_sweep_does_not_flag_a_size_after_a_failed_batch_that_held_the_wrong_answers(self):
+        # tickets 0-3 are wrong at every size and the N=4 batch holding them fails, so N=4 scores 26/26; N=8 then
+        # repeats N=1 exactly (26/30) and was once read as three items lost against N=4
+        wrong = {"export fails 0", "export fails 1", "export fails 2", "billing ticket 3"}
+        fake = self.scripted_fake(wrong=lambda t, batch: t in wrong, fail=lambda batch: len(batch) == 4 and "export fails 0" in batch)
+        lines = self.sweep_rows(fake, sizes="1,4,8")
+        self.assertIn("fine  26/30", lines[0]); self.assertIn("fine  26/26", lines[1]); self.assertIn("fine  26/30", lines[2])
+        for line in lines:
+            self.assertNotIn("investigate", line)
+
+    def test_sweep_compares_confidence_on_the_items_both_sizes_scored(self):
+        # tickets 0-7 are answered at 0.99 and the rest at 0.8 at every size; when the N=8 batch holding 0-7 fails,
+        # the mean over the rest is 0.05 below N=1's though no answer changed. A real fall on the same items flags
+        number = lambda t: int(t.rsplit(" ", 1)[1])
+        fake = self.scripted_fake(conf=lambda t, batch: 0.99 if number(t) < 8 else 0.8,
+                                  fail=lambda batch: len(batch) == 8 and "export fails 0" in batch)
+        lines = self.sweep_rows(fake)
+        self.assertIn("failed 8/30", lines[1]); self.assertNotIn("investigate", lines[1])
+        lines = self.sweep_rows(self.scripted_fake(conf=lambda t, batch: 0.9 if len(batch) == 1 else 0.85))
+        self.assertIn("investigate (heuristic): queue (confidence)", lines[1])
+
+    def test_sweep_headers_show_whole_question_ids(self):
+        # a Score column over a few items is about 20 columns wide, and the header once cut each id to its column,
+        # so two ids that share their first 20 characters printed identically
+        ids = ("customer_satisfaction_level_now", "customer_satisfaction_level_after")
+        with tempfile.TemporaryDirectory() as d:
+            fx = write_fixture(d)
+            self.edit_json(fx["batch-template.json"], lambda tpl: tpl.__setitem__("questions", {
+                qid: {"type": "score", "instructions": "How satisfied is the customer at `{ref}`?", "criteria": ["low", "mid", "high"]}
+                for qid in ids}))
+            with open(fx["dev.jsonl"], "w") as f:
+                for i in range(9):
+                    f.write(json.dumps({"id": f"s{i}", "state": {"message": f"ticket {i}"}, "expected": {qid: 1 for qid in ids}}) + "\n")
+            argv = ["sweep_batch.py", "--batch-template", fx["batch-template.json"], "--items", fx["dev.jsonl"], "--sizes", "1", "--sleep", "0"]
+            code, out, _, _ = self.run_script(argv, self.scripted_fake())
+        self.assertIsNone(code)
+        header = next(l for l in out.splitlines() if "q/req" in l)
+        for qid in ids:
+            self.assertIn(qid, header)
+        row = next(l for l in out.splitlines() if l.startswith("  1 "))
+        # the Q1 acc field (right-aligned; "-" with no position readout) ends where its header does
+        self.assertEqual(J.width(header[:header.index("Q1 acc") + len("Q1 acc")]), J.width(row[:row.index("-") + 1]))
+
+    @staticmethod
+    def choice_out(*groups, conf=0.9, skip=()):
+        """sweep_batch.outcomes() for a Choice: each (label, hits, n) group adds n items, the first hits of them right,
+        numbered on from the last group; items in skip are left out, as a failed batch leaves them."""
+        out, i = {}, 0
+        for lab, hits, n in groups:
+            for k in range(n):
+                if i not in skip:
+                    out[i] = (lab, k < hits, conf(i) if callable(conf) else conf)
+                i += 1
+        return out
+
     def test_choice_drop_rules(self):
-        def rowd(fine, n, conf=0.9, **classes):
-            return {"type": "choice", "fine": fine, "n": n, "mean_conf": conf,
-                    "per_class": {lab: {"n": c[1], "hits": c[0], "recall": c[0] / c[1]} for lab, c in classes.items()}}
-        drop = sweep_batch.choice_drop
-        # items lost are the recall drop over the smaller of the two labelled counts, so a best size with a
-        # different count is never compared hit-for-hit: 4/8, then 3/3 after a failed batch, then 2/6 loses
-        # two of the three the best size can vouch for and flags
-        b = {}
-        self.assertFalse(drop(rowd(24, 30, billing=(4, 8)), b))
-        self.assertFalse(drop(rowd(22, 25, billing=(3, 3)), b))
-        self.assertTrue(drop(rowd(24, 28, billing=(2, 6)), b))
-        # a size that scored one item of a class at full recall cannot vouch for two items, so a later size that
-        # merely repeats the baseline does not flag against it
-        b = {}
-        self.assertFalse(drop(rowd(24, 30, billing=(2, 8)), b))
-        self.assertFalse(drop(rowd(18, 23, billing=(1, 1)), b))
-        self.assertFalse(drop(rowd(24, 30, billing=(2, 8)), b))
-        # nor can two items prove a collapse on eight, while 8/8 -> 6/8 is the documented rule exactly
-        b = {}
-        drop(rowd(28, 30, billing=(2, 2)), b)
-        self.assertFalse(drop(rowd(26, 30, billing=(4, 8)), b))
-        b = {}
-        drop(rowd(30, 30, billing=(8, 8)), b)
-        self.assertTrue(drop(rowd(28, 30, billing=(6, 8)), b))
-        # a one-item class cannot lose two items, so 1/1 -> 0/1 is noise, and 2/2 -> 1/2 stays below the floor
-        b = {}
-        drop(rowd(30, 30, rare=(1, 1)), b)
-        self.assertFalse(drop(rowd(29, 30, rare=(0, 1)), b))
-        b = {}
-        drop(rowd(30, 30, billing=(2, 2)), b)
-        self.assertFalse(drop(rowd(29, 30, billing=(1, 2)), b))
-        self.assertTrue(drop(rowd(28, 30, billing=(0, 2)), b))
-        # fine: three items below the best accuracy over the smaller count; a shrunken n at the same accuracy is no drop
-        b = {}
-        drop(rowd(30, 30), b)
-        self.assertFalse(drop(rowd(22, 22), b))
-        self.assertFalse(drop(rowd(20, 22), b))
-        self.assertTrue(drop(rowd(19, 22), b))
-        self.assertTrue(drop(rowd(30, 30, conf=0.85), b))
-        self.assertEqual(b["classes"], {})
-        # the first row never flags, the best is kept in place rather than rebuilt, and a tie goes to the larger count
-        b = {}
-        self.assertFalse(drop(rowd(10, 30, conf=0.5, a=(1, 4)), b))
-        first = b["classes"]
-        drop(rowd(30, 30, conf=0.9, a=(4, 4)), b); drop(rowd(20, 20, conf=0.9, a=(2, 2)), b)
-        self.assertIs(b["classes"], first); self.assertEqual(b, {"classes": {"a": [(1.0, 4)]}, "acc": [(1.0, 30)], "conf": 0.9})
-        # a perfect score on a few items (most batches failed) does not hide a later fall from a large sample:
-        # 2/2, then 90/100, then 50/100 flags on fine, and the same shape flags a class
-        b = {}
-        drop(rowd(2, 2), b); self.assertFalse(drop(rowd(90, 100), b))
-        self.assertTrue(drop(rowd(50, 100), b))
-        self.assertEqual(b["acc"], [(1.0, 2), (0.9, 100)])
-        b = {}
-        drop(rowd(30, 30, billing=(1, 1)), b); self.assertFalse(drop(rowd(30, 30, billing=(9, 10)), b))
-        self.assertTrue(drop(rowd(30, 30, billing=(5, 10)), b))
+        drop, out = sweep_batch.choice_drop, self.choice_out
+        self.assertEqual(drop(out(("billing", 0, 30)), []), [])   # the first size has nothing to fall from
+        # an option losing at least two items and a quarter of its items flags, counted in whole items: 4/12 -> 1/12
+        # and 14/20 -> 9/20 were once missed to float rounding; a one-item class cannot lose two, and two items lost
+        # from forty is under a quarter
+        for before, after, reasons in (((8, 8), (6, 8), ["billing recall"]),
+                                       ((4, 12), (1, 12), ["fine", "billing recall"]),
+                                       ((14, 20), (9, 20), ["fine", "billing recall"]),
+                                       ((2, 8), (0, 8), ["billing recall"]),
+                                       ((2, 2), (0, 2), ["billing recall"]),
+                                       ((2, 2), (1, 2), []), ((1, 1), (0, 1), []), ((20, 40), (18, 40), [])):
+            with self.subTest(before=before, after=after):
+                pad = ("technical", 10, 10)
+                self.assertEqual(drop(out(("billing",) + after, pad), [out(("billing",) + before, pad)]), reasons)
+        # fine: three more items wrong on the same items; confidence: 0.05 lower on the same items, rounded (0.95 -> 0.90)
+        self.assertEqual(drop(out(("technical", 27, 30)), [out(("technical", 30, 30))]), ["fine"])   # 3 of 30 is under a quarter
+        self.assertEqual(drop(out(("technical", 28, 30)), [out(("technical", 30, 30))]), [])
+        self.assertEqual(drop(out(("technical", 30, 30), conf=0.90), [out(("technical", 30, 30), conf=0.95)]), ["confidence"])
+        self.assertEqual(drop(out(("technical", 30, 30), conf=0.86), [out(("technical", 30, 30), conf=0.90)]), [])
+        # every earlier size counts: a perfect score on two items does not hide a fall from 90/100 to 50/100
+        tiny = out(("technical", 2, 2)); big = out(("technical", 90, 100))
+        self.assertEqual(drop(big, [tiny]), [])
+        self.assertEqual(drop(out(("technical", 50, 100)), [tiny, big]), ["fine", "technical recall"])
+
+    def test_choice_drop_ignores_what_a_failed_batch_removed(self):
+        drop, out = sweep_batch.choice_drop, self.choice_out
+        # items 0-3 are wrong at every size; at the middle size their batch failed, so it scored 26/26. The size after
+        # repeats the first (26/30) and was once three items down on 26/26
+        first = out(("technical", 0, 4), ("technical", 26, 26)); failed = out(("technical", 0, 4), ("technical", 26, 26), skip=range(4))
+        self.assertEqual(drop(failed, [first]), [])
+        self.assertEqual(drop(first, [first, failed]), [])
+        # items 0-7 answered at 0.99 and the rest at 0.8: when their batch fails the mean over the rest is 0.05 lower
+        conf = lambda i: 0.99 if i < 8 else 0.8
+        self.assertEqual(drop(out(("technical", 30, 30), conf=conf, skip=range(8)), [out(("technical", 30, 30), conf=conf)]), [])
+        # a failed batch hides nothing either: the items both sizes scored still show a collapse
+        self.assertEqual(drop(out(("billing", 0, 8), ("technical", 22, 22), skip=range(4)), [out(("billing", 8, 8), ("technical", 22, 22))]),
+                         ["fine", "billing recall"])
+
+    def test_noul_drop_rules(self):
+        drop = sweep_batch.noul_drop
+        out = lambda *pairs, skip=(): {i: pair for i, pair in enumerate(pairs) if i not in skip}
+        base = [(False, 0.79)] + [(False, 0.1)] * 7 + [(True, 0.9)] * 2
+        self.assertEqual(drop(out(*base), [], 0.8), [])
+        # one more negative at the threshold on the same items; a positive 0.1 lower; the highest negative 0.2 higher
+        self.assertEqual(drop(out((False, 0.81), *base[1:]), [out(*base)], 0.8), ["false positives"])
+        self.assertEqual(drop(out(*base[:8], (True, 0.8), (True, 0.9)), [out(*base)], 0.8), ["lowest true"])
+        self.assertEqual(drop(out(*base[:8], (True, 0.81), (True, 0.9)), [out(*base)], 0.8), [])
+        self.assertEqual(drop(out((False, 0.3), *base[1:]), [out((False, 0.1), *base[1:])], 0.8), ["highest false"])
+        # two negatives answered 0.9 at every size, one of them in a batch that failed at the middle size: the last
+        # size (fp 2/30) was once flagged against the middle one (fp 1/22)
+        noisy = [(False, 0.9), (False, 0.9)] + [(False, 0.1)] * 28
+        middle = out(*noisy, skip={1} | set(range(20, 27)))
+        self.assertEqual(drop(middle, [out(*noisy)], 0.8), [])
+        self.assertEqual(drop(out(*noisy), [out(*noisy), middle], 0.8), [])
 
     MAINS = {"eval.py": ev.main, "ablate.py": ablate.main, "sweep_batch.py": sweep_batch.main}
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Compare N items per request across sizes, including position-quarter accuracy.
 Run the reference form you intend to ship; flags are heuristics, not significance tests
-or diagnoses of the cause of a change.
+or diagnoses of the cause of a change. Each size is compared with every earlier size on the
+items both of them scored, so a failed batch neither raises nor hides a flag, and a flag
+names what fell: a Choice's fine accuracy, confidence or one option's recall; a Noul's false
+positives, lowest true or highest false score; or last-quarter accuracy within the size.
 
   sweep_batch.py --batch-template T.json --items dev.jsonl [--items val.jsonl]
                  [--sizes 1,4,8,12,16,20] [--policy policy.json] [--model M]
@@ -14,40 +17,58 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jevlib as J
 
 
-def lost_items(best, rate, n):
-    """Items lost against a best (rate, n): the rate drop over the smaller of the two labelled counts. A drop is
-    only as credible as the smaller sample, so a one-item class can never lose two items, a failed batch that
-    shrinks n is judged on its own count, and with equal counts this is exactly hits_best - hits."""
-    return round((best[0] - rate) * min(best[1], n), 6)   # rounded so 3/22 of 22 counts as three items
+def outcomes(res, qid, q):
+    """One question's scored items at one batch size, keyed by position in the sweep (run_batched returns one row
+    per item, in order, and ids can repeat across --items files): (label, hit, confidence) for a Choice and
+    (label, p) for a Noul. Failed items and items the files leave unlabelled are absent, so two sizes are compared
+    only on the items both of them scored."""
+    out = {}
+    for i, r in enumerate(res):
+        a = (r.get("answers") or {}).get(qid)
+        if a is None or qid not in r["expected"] or not J.valid_label(q, r["expected"][qid]):
+            continue
+        lab = r["expected"][qid]
+        out[i] = (lab, a["choice"] == lab, a["confidence"]) if q["type"] == "choice" else (lab, a["noul"])
+    return out
 
 
-def fold_best(front, pair):
-    """Add a (rate, n) pair to the frontier of earlier sizes, dropping any pair it matches or beats on both rate
-    and labelled count. A dropped pair can never lose more items than the pair that beat it, so nothing is lost."""
-    if any(p[0] >= pair[0] and p[1] >= pair[1] for p in front):
-        return front
-    front[:] = sorted([p for p in front if not (pair[0] >= p[0] and pair[1] >= p[1])] + [pair], reverse=True)
-    return front
+def choice_drop(now, earlier):
+    """What fell for a Choice at this size against any earlier size, as the flag's reasons ([] when nothing did):
+    'fine' when three more items are wrong, 'confidence' when mean confidence is 0.05 lower, and '<option> recall'
+    when an option loses at least two items and at least a quarter of its items. now and each earlier entry come
+    from outcomes(), and each pair of sizes is compared only on the items both scored: a failed batch can neither
+    raise a flag (the answers it lost are compared with nothing) nor hide one, and a one-item class cannot lose two
+    items. Each option is measured against itself, so a large class collapsing is not averaged away."""
+    fine = conf = False; classes = set()
+    for before in earlier:
+        common = before.keys() & now.keys()
+        if not common:
+            continue
+        fine = fine or sum(before[i][1] - now[i][1] for i in common) >= 3
+        # a float mean is rounded before the comparison, so 0.95 -> 0.90 is the 0.05 drop it looks like
+        conf = conf or round(sum(before[i][2] - now[i][2] for i in common) / len(common), 9) >= 0.05
+        per = {}   # option -> (items, hits lost), counted in whole items so 4/12 -> 1/12 is exactly a quarter
+        for i in common:
+            n, lost = per.get(before[i][0], (0, 0)); per[before[i][0]] = (n + 1, lost + before[i][1] - now[i][1])
+        classes.update(lab for lab, (n, lost) in per.items() if lost >= 2 and 4 * lost >= n)
+    return (["fine"] if fine else []) + (["confidence"] if conf else []) + [f"{lab} recall" for lab in sorted(classes)]
 
 
-def choice_drop(r, b):
-    """Whether Choice report row r fell from the sizes seen so far in b, then fold r into b (start with {}).
-    A drop is accuracy three items below some earlier size, mean confidence 0.05 below its best, or one option
-    whose recall fell 0.25 from some earlier size while losing at least two items against that same size. Items
-    lost are measured by lost_items, so a failed batch that shrinks n, or a size where only one item of a class
-    was scored, cannot set off the flag on its own. Earlier sizes are kept as a frontier of (rate, n) pairs rather
-    than one best, so a perfect score on a few items cannot hide a later fall from a large sample. Each option is
-    measured against itself, so a large class collapsing is not compared with a small one."""
-    acc = r["fine"] / r["n"]; classes = b.setdefault("classes", {})
-    pc = {lab: c for lab, c in (r.get("per_class") or {}).items() if c["n"]}
-    collapsed = [lab for lab, c in pc.items() if any(c["recall"] <= p[0] - 0.25 and lost_items(p, c["recall"], c["n"]) >= 2
-                                                     for p in classes.get(lab, ()))]
-    drop = bool(collapsed) or ("acc" in b and (any(lost_items(p, acc, r["n"]) >= 3 for p in b["acc"])
-                                               or r["mean_conf"] <= b["conf"] - 0.05))
-    fold_best(b.setdefault("acc", []), (acc, r["n"])); b["conf"] = max(b.get("conf", 0.0), r["mean_conf"])
-    for lab, c in pc.items():
-        fold_best(classes.setdefault(lab, []), (c["recall"], c["n"]))
-    return drop
+def noul_drop(now, earlier, thr):
+    """What fell for a Noul at this size against any earlier size, as the flag's reasons: 'false positives' when
+    more negatives reach the threshold thr, 'lowest true' when the lowest positive score falls by 0.1, and
+    'highest false' when the highest negative score rises by 0.2, the early warning before false positives
+    appear. Each pair of sizes is compared on the items both scored, as in choice_drop."""
+    fp = low = high = False
+    for before in earlier:
+        common = before.keys() & now.keys()
+        pos = [i for i in common if before[i][0] is True]; neg = [i for i in common if before[i][0] is False]
+        fp = fp or sum(now[i][1] >= thr for i in neg) > sum(before[i][1] >= thr for i in neg)
+        if pos:
+            low = low or round(min(before[i][1] for i in pos) - min(now[i][1] for i in pos), 9) >= 0.1
+        if neg:
+            high = high or round(max(now[i][1] for i in neg) - max(before[i][1] for i in neg), 9) >= 0.2
+    return (["false positives"] if fp else []) + (["lowest true"] if low else []) + (["highest false"] if high else [])
 
 
 def main():
@@ -69,46 +90,44 @@ def main():
         items = [it for _, loaded in J.load_labelled(a.items, tpl) for it in loaded]
         tq = tpl["questions"]; qids = list(tq)
         print(f"{len(items)} items; questions per item: {len(qids)} ({', '.join(qids)})")
-        if any(isinstance(tq[q], dict) and tq[q].get("type") == "choice" for q in qids):   # only Choice cells print it
-            print("low = the Choice option with the lowest recall, hits/labelled; an option's recall falling is flagged even when fine holds")
+        if any(tq[q]["type"] == "choice" for q in qids):   # only Choice cells print it
+            print("low = the Choice option with the lowest recall, hits/labelled; a flag names what fell against an earlier size,"
+                  " compared on the items both sizes scored")
         # one column width per question: the widest cell its own type can print for this many items (every
-        # count at its maximum, its longest option name, the largest MAE on its rubric) or the no-answers
-        # note, measured rather than guessed so the columns after it stay aligned
-        W = {q: max(len(J.cell(J.worst_case(tq[q], len(items), bool(policy.get(q, {}).get("parents")), q))), len("(no scored answers)"))
+        # count at its maximum, its longest option name, the largest MAE on its rubric), the no-answers note or
+        # the whole question id, in terminal columns, measured rather than guessed so the columns after it stay
+        # aligned and two ids that share a prefix stay distinguishable
+        W = {q: max(J.width(J.cell(J.worst_case(tq[q], len(items), bool(policy.get(q, {}).get("parents")), q))),
+                    J.width("(no scored answers)"), J.width(q))
              for q in qids}
-        print(f"{'N':>3} {'q/req':>5} " + " ".join(f"{q[:W[q]]:<{W[q]}}" for q in qids)
+        print(f"{'N':>3} {'q/req':>5} " + " ".join(J.pad(q, W[q]) for q in qids)
               + f" {'Q1 acc':>6} {'Q4 acc':>6} {'Q4 conf':>7} {'tok/item':>8} {'ms/item':>7} {'requests':>8}")
-        best = {}
+        earlier = {q: [] for q in qids}   # each question's outcomes() at every earlier size
         for n in sizes:
             res = J.run_batched(items, tpl, n, a.model, a.sleep); rep = J.score(res, tpl, policy)
             cells = []; flags = []
             for q in qids:
                 r = rep["questions"].get(q)
-                if not r:
-                    cells.append(f"{'(no scored answers)':<{W[q]}}"); continue
-                cells.append(J.cell(r).ljust(W[q]))
-                if r["type"] == "choice":
-                    if choice_drop(r, best.setdefault(q, {})):
-                        flags.append(q)   # the per-class rule catches one option collapsing while fine holds
-                elif r["type"] == "noul":
-                    b = best.setdefault(q, {"fp": r["false_positives"], "lo": r["lowest_true"], "hi": r["highest_false"]})
-                    if (r["false_positives"] > b["fp"]
-                            or (r["lowest_true"] is not None and r["lowest_true"] <= (b["lo"] or 0) - 0.1)
-                            or (r["highest_false"] is not None and r["highest_false"] >= (b["hi"] if b["hi"] is not None else 1) + 0.2)):
-                        flags.append(q)   # a rising highest-false score is the early warning before false positives appear
-                    b["fp"] = min(b["fp"], r["false_positives"]); b["lo"] = max(b["lo"] or 0, r["lowest_true"] or 0)
-                    b["hi"] = min(b["hi"] if b["hi"] is not None else 1, r["highest_false"] if r["highest_false"] is not None else 1)
+                cells.append(J.pad(J.cell(r) if r else "(no scored answers)", W[q]))
+                typ = tq[q]["type"]
+                if typ in ("choice", "noul"):
+                    now = outcomes(res, q, tq[q])
+                    why = (choice_drop(now, earlier[q]) if typ == "choice"
+                           else noul_drop(now, earlier[q], J.threshold(policy, q, "noul")))
+                    if why:
+                        flags.append(f"{q} ({', '.join(why)})")
+                    earlier[q].append(now)
             q1 = q4 = c4 = None
             for q in qids:   # first Choice with a by-position readout supplies the columns
                 bp = (rep["questions"].get(q) or {}).get("by_position")
                 if bp:
                     q1, q4, c4 = bp[0]["acc"], bp[3]["acc"], bp[3]["mean_conf"]; break
-            if q1 is not None and q4 is not None and q4 <= q1 - 0.15:
+            if q1 is not None and q4 is not None and round(q1 - q4, 9) >= 0.15:
                 flags.append("last-quarter")
             print(f"{n:>3} {J.fmt(rep['questions_per_request']):>5} " + " ".join(cells)
                   + f" {J.fmt(q1):>6} {J.fmt(q4):>6} {J.fmt(c4):>7} {J.fmt(rep['tokens_per_item'], 0):>8} {J.fmt(rep['ms_per_item'], 0):>7} {rep['requests']:>8}"
                   + f"  failed {rep['failed']}/{rep['items']}"
-                  + (f"   <-- investigate (heuristic): {', '.join(flags)}" if flags else ""))
+                  + (f"   <-- investigate (heuristic): {'; '.join(flags)}" if flags else ""))
             if a.verbose:
                 J.print_report(f"N={n}", rep, True)
     except J.JevError as e:
