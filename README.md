@@ -199,8 +199,14 @@ The scripts are the skill's helpers and also work on their own. They live in
 `skills/jev-frame-engineering/scripts/` in a clone,
 `~/.claude/skills/jev-frame-engineering/scripts/` under a symlinked install, and
 `~/.claude/plugins/cache/blue-terra/jev-frame-engineering/<version>/skills/jev-frame-engineering/scripts/`
-under a plugin install. Each script prints its own usage with `--help`, and the file formats are
-specified in the [evaluation protocol](skills/jev-frame-engineering/references/eval-protocol.md).
+under a plugin install. Each prints its usage with `--help` (`jevlib.py` is the library they
+share), and the file formats are specified in the
+[evaluation protocol](skills/jev-frame-engineering/references/eval-protocol.md).
+
+Keep question sets, labels and raw output in a directory of your own and run the scripts by path
+from there. Under a clone or a symlinked install the skill directory is this repository, so
+labelled data or `--json` output written inside it would sit beside the skill as untracked files
+that a broad `git add` would publish.
 
 A run needs a question set and labelled items. `questions.json`:
 
@@ -234,23 +240,59 @@ A run needs a question set and labelled items. `questions.json`:
 ```
 
 ```sh
-export TYPESAFE_API_KEY=...          # or ~/.config/typesafe/api_key, mode 600
-cd skills/jev-frame-engineering
-python3 scripts/eval.py --questions questions.json --items dev.jsonl --repeat 3
+export TYPESAFE_API_KEY=...                        # or ~/.config/typesafe/api_key, mode 600
+S=~/.claude/skills/jev-frame-engineering/scripts   # or the clone or plugin path above
+python3 "$S/eval.py" --questions questions.json --items dev.jsonl --repeat 3
 ```
 
-`eval.py` checks every label against the question set before its first request and refuses a
-file whose values a question cannot take, then reports per-class recall and precision, counts at
-the policy threshold, failures, and token use, separately for each `--items` file; `--verbose` adds confidence buckets and the miss
-list, and `--json out.json` keeps the raw answers. The others follow the same shape; `ablate.py` and `sweep_batch.py` also print the
-Choice option with the lowest recall in each cell, since overall accuracy can hold while one
-class collapses:
+`eval.py` checks the question set and every label before its first request, and refuses a file
+whose values a question cannot take, saying what each question takes. It then reports, separately
+for each `--items` file, per-class recall and precision over all answers and at the policy
+threshold, failures, and token use; `--verbose` adds confidence buckets and the miss list, and
+`--json out.json` keeps the raw answers. `ablate.py` makes the same checks and prints one column
+per `--items` file, each cell ending with the Choice option with the lowest recall, since overall
+accuracy can hold while one class collapses:
 
 ```sh
-python3 scripts/ablate.py --questions questions.json --question queue --items dev.jsonl
-python3 scripts/sweep_batch.py --batch-template batch-template.json --items dev.jsonl --sizes 1,8,16,32
-python3 scripts/token_probe.py
+python3 "$S/ablate.py" --questions questions.json --question queue --items dev.jsonl
 ```
+
+`sweep_batch.py` puts several items in each request, so it takes a batch template instead of a
+question set: the same questions, pointed at each item by `{ref}` (see the
+[batching guide](skills/jev-frame-engineering/references/batching.md)). `batch-template.json` for
+the files above:
+
+```json
+{
+  "model": "jev-1.13.0",
+  "array_field": "messages",
+  "item_value": "message",
+  "questions": {
+    "queue": {
+      "type": "choice",
+      "instructions": "The ticket at `{ref}` is a support ticket. Which queue should handle it?",
+      "criteria": {
+        "billing": {"what": "charges, invoices, refunds", "not_for": "pre-sales questions"},
+        "technical": {"what": "the product misbehaves"},
+        "other": {"what": "anything the options above do not cover"}
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Does the ticket at `{ref}` need attention today?",
+      "criteria": {"true": "an outage or a same-day deadline", "false": "a routine request"}
+    }
+  }
+}
+```
+
+```sh
+python3 "$S/sweep_batch.py" --batch-template batch-template.json --items dev.jsonl --sizes 1,8,16,32
+python3 "$S/token_probe.py"
+```
+
+The sweep runs its `--items` files as one set, and flags a size whose results fell against an
+earlier size, compared on the items both of them scored.
 
 Each of these calls the live API with your credential and is billed by TypeSafe; `--repeat` and
 `--sizes` multiply that cost. The offline tests in `tests/` are the part of the repository that

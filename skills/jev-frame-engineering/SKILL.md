@@ -167,12 +167,13 @@ Below it, review, abstain, or use a separately validated coarse decision; a pare
 automatically correct.
 
 Report per-class recall and precision rather than overall accuracy whenever the labels are
-imbalanced, and for rare positives add prevalence at the operating threshold. Consider
-precision-recall curves/average precision as well as ROC-AUC; the latter can conceal a poor
-precision outcome at low prevalence. `eval.py` prints per-class recall and precision for each
-Choice option and recall, precision and true negative rate for each Noul at its threshold, plus
-Choice buckets; it does not draw those curves or fit a calibrator. Reassess any calibration layer
-under traffic or base-rate changes.
+imbalanced, at the operating threshold when an action depends on it, and for rare positives add
+prevalence. Consider precision-recall curves/average precision as well as ROC-AUC; the latter can
+conceal a poor precision outcome at low prevalence. `eval.py` prints, for each Choice option,
+recall and precision over all scored answers and again counting only answers at the policy
+threshold (the rates an automatic action achieves), and for each Noul recall, precision and true
+negative rate at its threshold, plus Choice buckets; it does not draw those curves or fit a
+calibrator. Reassess any calibration layer under traffic or base-rate changes.
 
 ## 7. Keep failures distinct and cache the complete judgment input
 
@@ -192,18 +193,21 @@ See [production contract](references/production-contract.md) and the [pre-ship c
 
 Python 3, standard library only. Credentials come from `TYPESAFE_API_KEY` or
 `~/.config/typesafe/api_key`; set file permissions to 600 (the loader does not enforce the mode).
-Run them from this skill's directory (`python3 scripts/eval.py --help` prints each script's
-flags); every script except the offline helpers in `jevlib.py` calls the live API and is billed.
-Each checks the label file against the question set and refuses it before the first request, so
-a misspelt option or a string `"false"` is reported by item rather than billed and misreported.
-The client sanitizes its errors for the active credential. Raw evaluation output still contains
-input data and must be handled accordingly.
+Run each script by its path from a directory that holds the question sets and labels, and keep
+those files and any `--json` output out of this skill's directory;
+`python3 <skill-dir>/scripts/eval.py --help` prints a script's flags. Every script calls the
+live API and is billed; `jevlib.py` is the library they share. `eval.py`, `ablate.py` and
+`sweep_batch.py` check the question set and every label file before the first request, so a
+malformed question, a misspelt option or a string `"false"` is reported by item, with what the
+question takes, rather than billed and misreported. The client sanitizes its errors for the
+active credential. Raw evaluation output still contains input data and must be handled
+accordingly.
 
 | script | use |
 |---|---|
-| `eval.py` | Choice/Noul/Score metrics with per-class recall/precision and Noul recall/precision/TNR; repeats; single-item option reversal; batch evaluation; `--json` raw answers |
-| `ablate.py` | remove descriptive fields; compare metrics (with the lowest per-class recall) and usage, one target question at a time |
-| `sweep_batch.py` | compare batch sizes and position quarters; flags a Choice drop in accuracy, confidence or an option's recall (item floors measured over the smaller of the two sizes' scored counts, so neither a failed batch nor a one-item class is a drop on its own), a Noul rise in false positives or highest-false score or fall in lowest-true score, and a last-quarter accuracy drop; flags are heuristic, not significance tests |
+| `eval.py` | Choice/Noul/Score metrics with per-class recall/precision (over all answers and at the threshold) and Noul recall/precision/TNR; repeats; single-item option reversal; batch evaluation; `--json` raw answers |
+| `ablate.py` | remove descriptive fields; compare metrics (with the lowest per-class recall) and usage per item file, one target question at a time |
+| `sweep_batch.py` | compare batch sizes and position quarters; compares each size with every earlier size on the items both scored, so a failed batch neither raises nor hides a flag, and names what fell: a Choice's accuracy, confidence or one option's recall, a Noul's false positives or its lowest-true or highest-false score, or last-quarter accuracy; flags are heuristic, not significance tests |
 | `token_probe.py` | inspect usage for minimal questions and synthetic text |
 | `jevlib.py` | HTTP client, runners, scoring, error redaction |
 

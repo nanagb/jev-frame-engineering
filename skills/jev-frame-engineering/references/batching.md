@@ -60,8 +60,10 @@ text. Choose an `array_field` that does not collide with a shared-state field.
    A tail drop suggests investigation; it does not identify the cause by itself.
 
 `sweep_batch.py` concatenates all supplied item files into one sweep. Do not mix a final holdout
-into that sweep while selecting size. Its flags use fixed heuristics and are not significance
-checks. Compare the same successfully judged items if failure rates differ between conditions.
+into that sweep while selecting size. Its flags compare each size with every earlier size on the
+items both judged successfully ([evaluation protocol](eval-protocol.md), section 4); they use fixed
+heuristics and are not significance checks. Compare the same successfully judged items in your
+own analysis too whenever failure rates differ between conditions.
 
 ## Sharing definitions and budgets
 

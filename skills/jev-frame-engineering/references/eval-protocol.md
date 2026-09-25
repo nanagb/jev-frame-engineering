@@ -13,12 +13,14 @@ Items are JSONL:
 
 Expected values are option names for Choice, JSON booleans for Noul, and zero-based rubric
 positions for Score. Partial labels are allowed. Score predictions can fall between levels.
-Every script checks each label against the question set before its first request and refuses
-the file, naming the items, when a value is one the question cannot take (a misspelt option,
-the string `"false"`, a level off the rubric), so a label-file mistake costs no API calls. Every
-`--items` file is checked before the first of them is run, not as its turn comes. A question that
-can take no label at all — a misspelt `type`, a Choice or Score with no `criteria` — is reported
-as a question-set fault naming the question, so a correct label file is not blamed for it.
+`eval.py`, `ablate.py` and `sweep_batch.py` check each label against the question set before
+their first request and refuse the file, naming the items and what each question takes, when a
+value is one the question cannot take (a misspelt option, the string `"false"`, a level off the
+rubric), so a label-file mistake costs no API calls. Every `--items` file is checked before the
+first of them is run, not as its turn comes. A question no request could carry — a misspelt
+`type`, a Choice whose `criteria` is not an object of options, a Score whose `criteria` is not an
+array of levels — is reported first as a question-set fault naming the question, whether or not
+the file labels it, so a correct label file is not blamed for it.
 
 Split before tuning, keeping related records and near duplicates in the same split. Use dev for
 wording, validation for model/threshold selection, and an untouched test set for final reporting.
@@ -65,18 +67,15 @@ levels, since their order defines the scale. Use the production option order for
 
 - **Choice:** fine and optional coarse accuracy; per-class recall and precision for every option,
   printed as hits/labelled and hits/predicted with `-` for a zero denominator (the headline on an
-  imbalanced label set, where overall accuracy can hide a class that is never caught);
-  accepted/correct counts at the policy threshold; mean confidence; with `--verbose`, per-bucket
-  and cumulative accuracy/coverage, batch position quarters and the miss list. An answer outside
-  the option list never reaches the scorer: the client rejects it and the item counts as a
-  failure. `ablate.py` and `sweep_batch.py` print the option with the lowest recall in each cell
-  (a recall tie goes to the option with the least support), and the sweep flags an option whose
-  recall falls by 0.25 from any earlier size while losing at least two items against it. Items lost are the
-  recall drop over the smaller of the two sizes' labelled counts, since a drop is only as credible
-  as the smaller sample: a size that scored one item of a class cannot set off the flag, and a
-  failed batch that shrinks the count is not read as a loss. The fine-accuracy flag uses the same
-  floor at three items. Every earlier size that no other beats on both rate and count is kept
-  for comparison, so a perfect score on a few items cannot hide a later fall from a large sample.
+  imbalanced label set, where overall accuracy can hide a class that is never caught), over all
+  scored answers and again counting only answers at or above the policy threshold, the rates an
+  automatic action at that threshold achieves; accepted/correct counts at the policy threshold;
+  mean confidence; with `--verbose`, per-bucket and cumulative accuracy/coverage, batch position
+  quarters and the miss list. An answer outside the option list never reaches the scorer: the
+  client rejects the whole response, so in batched mode every item in that request counts as a
+  failure, and in single mode the item's answers to its other questions are lost with it.
+  `ablate.py` and `sweep_batch.py` print the option with the lowest recall in each cell (a recall
+  tie goes to the option with more labelled items, which has lost more of them).
 - **Noul:** caught positives, false positives, class counts, and at the threshold recall
   (caught/positives), precision (caught/(caught + false positives)) and true negative rate
   ((negatives − false positives)/negatives), each printed as `-` when its denominator is zero;
@@ -89,6 +88,15 @@ levels, since their order defines the scale. Use the production option order for
   elsewhere). They are listed as JSON under `unlisted labels` for every question type, scored as
   misses, and counted in no class, so every rate above is computed over labels the question can
   take.
+
+`sweep_batch.py` compares each batch size with every earlier size on the items both of them
+scored, so a failed batch neither raises a flag (the answers it lost are compared with nothing)
+nor hides one, and names what fell: `fine` when three more items are wrong, `confidence` when mean
+confidence is 0.05 lower, `<option> recall` when an option loses at least two items and at least
+a quarter of its items, for a Noul `false positives` when more negatives reach the threshold,
+`lowest true` when the lowest positive score falls by 0.1 and `highest false` when the highest
+negative score rises by 0.2, and `last-quarter` when the last position quarter's accuracy is 0.15
+below the first's. These are fixed heuristics, not significance tests.
 
 The scorer does not apply a production policy, compute calibration curves/confidence intervals,
 or implement review. Coarse accuracy maps all labels to parents; it does not establish the
@@ -131,7 +139,7 @@ Preserve raw results and dataset versions so a later reviewer can reproduce the 
 
 ## Input files
 
-- **Items** (`--items`): JSONL as in section 1. `id` defaults to the line number and `expected` to `{}`.
-- **Questions** (`--questions`): `{"model": "jev-1.13.0", "questions": {<id>: {"type": "choice" | "noul" | "score", "instructions": ..., "criteria": ...}}}`. A bare question map is also accepted, and `model` defaults to `jevlib.DEFAULT_MODEL`. Question bodies follow the TypeSafe API; `ablate.py` removes the descriptive fields `not_for`, `examples`, `notes`, and `inspect` where present.
+- **Items** (`--items`): JSONL as in section 1. `id` defaults to the item's line number in the file (from 1, counting comments and blank lines) and `expected` to `{}`.
+- **Questions** (`--questions`): `{"model": "jev-1.13.0", "questions": {<id>: {"type": "choice" | "noul" | "score", "instructions": ..., "criteria": ...}}}`. A bare question map is also accepted, and `model` defaults to `jevlib.DEFAULT_MODEL`. Question bodies follow the TypeSafe API: a Choice's `criteria` is an object of option name to description, a Score's an array of levels, a Noul's optional. `ablate.py` removes the descriptive fields `not_for`, `examples`, `notes`, and `inspect` where present, and adds a "minus all" variant only when more than one is.
 - **Batch template** (`--batch-template`): `{"array_field", "item_value"?, "shared_state"?, "reference"?, "questions", "model"?}`. Each request places up to N item values (the whole `state`, or `state[item_value]`) under `array_field` on top of `shared_state`, and `{ref}` in each question expands per item. `reference` is `keyed` (default: an object keyed `item000`.., ref `<array_field>.item017`), `quoted` (plain array, ref `<array_field>[17]`, with the item's JSON value appended to the question), or `index` (plain array, no quoting).
 - **Policy** (`--policy`): section 5. Thresholds default to 0.75 for Choice and 0.8 for Noul when omitted.
