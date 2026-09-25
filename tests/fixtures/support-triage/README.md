@@ -62,5 +62,14 @@ single-item question set never changed a label; pointer criteria at batch size o
 `urgent` Noul 4-5/50 in each repeat against inline `what` criteria. The single-item question set
 scored `queue` 47/50, `urgent` 47-48/50, `contains_secret` 50/50.
 
+On 2026-09-24 (same model, three repeats) a 2x2 over the batch template, with the Choice's
+criteria as pointers into `queues` or inline and the Nouls' definitions inline or as pointers into
+shared state, at 1 and 8 tickets per request and scored on dev and val separately: the Choice
+stayed within one item either way; pointer wording raised `urgent` for 40-46 of the 50 tickets,
+which cost 1-4 of 30 on dev and at most one of 20 on val when cut at 0.5 and caught up to two
+more positives at the 0.8 policy threshold; at eight tickets per request pointers saved 12% of input
+tokens for the Choice's definitions and a further 16% for the Nouls'. `contains_secret` scored
+every ticket right at 0.5 in every condition.
+
 The fixture is small and its labels are one author's; these numbers show the workflow and the
 shape of each effect, not production accuracy or a threshold for another domain.

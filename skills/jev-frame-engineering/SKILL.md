@@ -126,11 +126,16 @@ See [production contract](references/production-contract.md).
 ## 5. Measure shared definitions and choose fan-out by cost and latency
 
 - Shared state is sent once. Moving repeated definitions there and referring to them by name
-  saves tokens only once several items share a request, and the indirection can cost accuracy:
-  on the fixture at batch size one, pointer criteria cost 15% more tokens than inline and the
-  `urgent` Noul fell from 47-48/50 to 43/50 in all three repeats, every miss a borderline
-  negative pushed above 0.5, while adding the same definitions to state without pointing at them
-  cost at most one item. Compare with inline criteria before adopting it.
+  saves tokens only once several items share a request: on the fixture, pointer criteria cost
+  15% more tokens than inline at one ticket per request and saved 12% (the Choice's
+  definitions) and a further 16% (the Nouls') at eight. The indirection also changes answers.
+  A Choice pointing at shared definitions stayed within one item of inline on dev and val at
+  both sizes, but pointer wording raised the `urgent` Noul's score for 40-46 of the 50 tickets
+  (negatives by 0.04-0.08 on average, positives by 0.03-0.08). Cut at 0.5, that turned
+  borderline negatives into false positives (43/50 against 47-48/50 single-item; with the batch
+  template 1-4 of 30 on dev and at most one of 20 on val); at the 0.8 policy threshold it caught
+  up to two more positives. Treat a switch between inline and pointer wording as a new question: re-check
+  accuracy and re-select its thresholds before adopting it.
 - Independent and speculative questions can run together; code consumes the applicable answers.
   Additional questions still consume input tokens. Routing first saves unused branch tokens (on
   the fixture, 1,247 tokens per item for route-then-ask against 1,699 for one request carrying
