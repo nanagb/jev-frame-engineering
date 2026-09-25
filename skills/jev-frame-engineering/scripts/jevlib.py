@@ -4,7 +4,7 @@ Client errors sanitize the active API key. Evaluation reports may contain raw in
 Errors are split into JevError (non-retryable request/configuration failure) and
 JevNoJudgment (no usable response; never substitute a model answer).
 """
-import json, math, os, re, statistics, sys, time, unicodedata, urllib.error, urllib.request
+import http.client, json, math, os, re, statistics, sys, time, unicodedata, urllib.error, urllib.request
 from collections import Counter
 from email.utils import parsedate_to_datetime
 
@@ -93,23 +93,24 @@ def _validate_response(data, questions):
 
 def post(state, questions, model=DEFAULT_MODEL, key=None, timeout=20.0, max_retries=2,
          max_retry_wait=30.0):
-    """One evaluation. Returns (response_json, latency_ms). Retries 408/429/5xx with
-    exponential backoff honouring Retry-After within max_retry_wait. Other HTTP
-    statuses are not retried. Latency includes retries and waits on success."""
+    """One evaluation. Returns (response_json, latency_ms). Retries 408/429/5xx and dropped or
+    cut-off connections with exponential backoff honouring Retry-After within max_retry_wait.
+    A 200 body that is not JSON or fails validation is resent once (on 2026-09-20 every such
+    body succeeded on resend); when the resend is invalid too, the error carries the body's
+    first 500 bytes so its shape can be reported. Other HTTP statuses are not retried.
+    Latency includes retries and waits on success."""
     if type(max_retries) is not int or max_retries < 0 or not _number(max_retry_wait, 0, float("inf")):
         raise JevError("max_retries must be a nonnegative integer and max_retry_wait finite and nonnegative")
     key = key or load_key()
     body = json.dumps({"model": model, "state": state, "questions": questions}).encode()
-    delay = 1.0
+    delay = 1.0; resent = False
     t0 = time.perf_counter()
     for attempt in range(max_retries + 1):
         req = urllib.request.Request(API_URL, data=body, method="POST",
                                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read())
-                _validate_response(data, questions)
-                return data, (time.perf_counter() - t0) * 1000
+                raw = r.read()
         except urllib.error.HTTPError as e:
             text = redact(e.read().decode(errors="replace"), key)[:500]
             if e.code not in (408, 429) and not 500 <= e.code < 600:
@@ -121,14 +122,25 @@ def post(state, questions, model=DEFAULT_MODEL, key=None, timeout=20.0, max_retr
             if wait > max_retry_wait:
                 raise JevNoJudgment(f"HTTP {e.code}: retry wait exceeds budget; reschedule later") from None
             time.sleep(wait); delay *= 2
-        except (json.JSONDecodeError, UnicodeError):
-            raise JevNoJudgment("invalid JSON response; no judgment") from None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:   # HTTPException: a body cut off mid-read
             if attempt == max_retries:
                 raise JevNoJudgment(f"no response after {max_retries} retries: {redact(str(e), key)}") from None
             if delay > max_retry_wait:
                 raise JevNoJudgment("retry wait exceeds budget; reschedule later") from None
             time.sleep(delay); delay *= 2
+            continue
+        try:
+            data = json.loads(raw)
+            _validate_response(data, questions)
+            return data, (time.perf_counter() - t0) * 1000
+        except (ValueError, JevNoJudgment):   # not JSON (JSONDecodeError, UnicodeDecodeError) or no usable answer
+            if resent or attempt == max_retries or delay > max_retry_wait:
+                shown = redact(raw[:500].decode("utf-8", errors="replace"), key)
+                raise JevNoJudgment(("invalid response twice" if resent else "invalid response")
+                                    + ": not JSON, or missing or malformed model, usage or answers; first 500 bytes: "
+                                    + shown) from None
+            resent = True; time.sleep(delay); delay *= 2
 
 
 # ---------- files ----------

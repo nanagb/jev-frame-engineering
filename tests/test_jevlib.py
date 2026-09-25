@@ -156,11 +156,53 @@ class ClientBehavior(unittest.TestCase):
                 J.post("item", QUESTIONS, key=KEY, max_retries=0)
         self.assertNotIn(KEY, str(caught.exception))
 
-    def test_malformed_json_is_no_judgment(self):
-        with patch.object(J.urllib.request, "urlopen", return_value=io.BytesIO(b"not JSON")) as call:
-            with self.assertRaises(J.JevNoJudgment):
+    def test_malformed_json_is_no_judgment_after_one_resend(self):
+        with patch.object(J.urllib.request, "urlopen", side_effect=[io.BytesIO(b"not JSON"), io.BytesIO(b"not JSON")]) as call, \
+                patch.object(J.time, "sleep") as sleep:
+            with self.assertRaises(J.JevNoJudgment) as caught:
                 J.post("item", QUESTIONS, key=KEY)
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertIn("invalid response twice", str(caught.exception))
+        self.assertIn("first 500 bytes: not JSON", str(caught.exception))
+
+    def test_an_invalid_body_is_resent_once(self):
+        # on 2026-09-20 every 200 body that failed validation succeeded when the identical request was resent
+        for first in (b"not JSON", json.dumps({**response(), "answers": {}}).encode()):
+            with self.subTest(first=first), patch.object(J.urllib.request, "urlopen", side_effect=[io.BytesIO(first), wire()]) as call, \
+                    patch.object(J.time, "sleep") as sleep:
+                data, _ = J.post("item", QUESTIONS, key=KEY)
+                self.assertEqual(data["answers"]["flag"]["noul"], 0.8)
+                self.assertEqual(call.call_count, 2)
+                sleep.assert_called_once_with(1.0)
+
+    def test_an_invalid_body_is_resent_only_once_and_shown_redacted(self):
+        # one resend even with retries to spare; the error keeps 500 bytes of the body, with the key redacted
+        body = json.dumps({"model": "m", "note": f"echo {KEY}", "pad": "x" * 2000}).encode()
+        with patch.object(J.urllib.request, "urlopen", side_effect=[io.BytesIO(body), io.BytesIO(body), wire()]) as call, \
+                patch.object(J.time, "sleep"):
+            with self.assertRaises(J.JevNoJudgment) as caught:
+                J.post("item", QUESTIONS, key=KEY, max_retries=5)
+        msg = str(caught.exception)
+        self.assertEqual(call.call_count, 2)
+        self.assertNotIn(KEY, msg); self.assertIn("<redacted>", msg)
+        self.assertLess(len(msg.split("first 500 bytes: ", 1)[1]), 510)
+        with patch.object(J.urllib.request, "urlopen", side_effect=[io.BytesIO(b"not JSON"), wire()]) as call:
+            with self.assertRaises(J.JevNoJudgment) as caught:
+                J.post("item", QUESTIONS, key=KEY, max_retries=0)   # no retries means no resend either
         self.assertEqual(call.call_count, 1)
+        self.assertNotIn("twice", str(caught.exception))
+
+    def test_a_body_cut_off_mid_read_is_retried(self):
+        class CutOff(io.BytesIO):
+            def read(self, *args):
+                raise J.http.client.IncompleteRead(b'{"model": ')
+        with patch.object(J.urllib.request, "urlopen", side_effect=[CutOff(), wire()]) as call, \
+                patch.object(J.time, "sleep") as sleep:
+            data, _ = J.post("item", QUESTIONS, key=KEY)
+        self.assertEqual(data["answers"]["flag"]["noul"], 0.8)
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(1.0)
 
     def test_missing_and_invalid_answers_are_no_judgment(self):
         bad = [[], {}, {**response(), "answers": {}}, {**response(), "usage": {}},
@@ -168,7 +210,8 @@ class ClientBehavior(unittest.TestCase):
                response({"flag": {"type": "noul", "noul": 2}}),
                response({"flag": {"type": "choice", "noul": 0.5}})]
         for data in bad:
-            with self.subTest(data=data), patch.object(J.urllib.request, "urlopen", return_value=wire(data)):
+            with self.subTest(data=data), patch.object(J.urllib.request, "urlopen", side_effect=[wire(data), wire(data)]), \
+                    patch.object(J.time, "sleep"):
                 with self.assertRaises(J.JevNoJudgment):
                     J.post("item", QUESTIONS, key=KEY)
 
@@ -185,7 +228,8 @@ class ClientBehavior(unittest.TestCase):
         self.assertEqual(data["answers"], answers)
         broken = copy.deepcopy(answers)
         broken["route"]["choice"] = "not-an-option"
-        with patch.object(J.urllib.request, "urlopen", return_value=wire(response(broken))):
+        with patch.object(J.urllib.request, "urlopen", side_effect=[wire(response(broken)), wire(response(broken))]), \
+                patch.object(J.time, "sleep"):
             with self.assertRaises(J.JevNoJudgment):
                 J.post("item", qs, key=KEY)
 
