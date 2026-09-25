@@ -647,11 +647,29 @@ class ReportingBehavior(unittest.TestCase):
 
     def test_bad_input_files_and_arguments_exit_with_a_message(self):
         # each of these was a traceback: a missing second --items file, a question id ablate cannot find, a plain
-        # question set passed as a batch template, and a --sizes that is not a number
+        # question set passed as a batch template, a --sizes that is not a number, a malformed policy file, and a
+        # --json path in a directory that does not exist (found only after the whole billed run)
         with tempfile.TemporaryDirectory() as d:
             fx = write_fixture(d); missing = os.path.join(d, "val.jsonl")
             dev, qs, tpl = fx["dev.jsonl"], fx["questions.json"], fx["batch-template.json"]
-            for argv, fragment in (
+            policies = {}
+            for name, body in (("list", []), ("number", {"queue": 0.8}), ("text", {"queue": {"threshold": "high"}}),
+                               ("parents", {"queue": {"parents": ["billing"]}})):
+                policies[name] = os.path.join(d, f"policy-{name}.json")
+                with open(policies[name], "w") as f:
+                    json.dump(body, f)
+            bad_policy = [(["eval.py", "--questions", qs, "--items", dev, "--policy", policies["list"]],
+                           "a policy is an object of question id to settings, not an empty array"),
+                          (["ablate.py", "--questions", qs, "--question", "queue", "--items", dev, "--policy", policies["number"]],
+                           "queue is a number, not an object"),
+                          (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--policy", policies["text"]],
+                           'queue.threshold is "high", not a number from 0 to 1'),
+                          (["eval.py", "--questions", qs, "--items", dev, "--policy", policies["parents"]],
+                           "queue.parents is not an object of option name to parent label")]
+            for argv, fragment in bad_policy + [
+                    (["eval.py", "--questions", qs, "--items", dev, "--json", os.path.join(d, "no-such-dir", "out.json")],
+                     "give a file in an existing directory"),
+                    (["eval.py", "--questions", qs, "--items", dev, "--json", d], "give a file in an existing directory")] + [
                     (["eval.py", "--questions", qs, "--items", dev, "--items", missing], "cannot read " + missing),
                     (["ablate.py", "--questions", qs, "--question", "queue", "--items", dev, "--items", missing], "cannot read " + missing),
                     (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--items", missing], "cannot read " + missing),
@@ -659,7 +677,7 @@ class ReportingBehavior(unittest.TestCase):
                      "has no question 'queu'; its questions are queue, urgent"),
                     (["sweep_batch.py", "--batch-template", qs, "--items", dev], "a batch template needs 'array_field'"),
                     (["eval.py", "--batch-template", qs, "--items", dev], "a batch template needs 'array_field'"),
-                    (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--sizes", "1,x"], "--sizes must contain positive integers")):
+                    (["sweep_batch.py", "--batch-template", tpl, "--items", dev, "--sizes", "1,x"], "--sizes must contain positive integers")]:
                 with self.subTest(argv=argv):
                     code, _, err, call = self.run_script(argv)
                     self.assertEqual(code, 2)

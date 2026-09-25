@@ -38,7 +38,7 @@ def main():
     try:
         qset = J.load_json(a.questions); qs = J.questions_of(qset) if isinstance(qset, dict) else None
         model = a.model or (qset.get("model") if isinstance(qset, dict) else None)
-        policy = J.load_json(a.policy) if a.policy else {}
+        policy = J.load_policy(a.policy)
         if not isinstance(qs, dict) or a.question not in qs:
             raise J.JevError(f"{a.questions} has no question {a.question!r}"
                              + (f"; its questions are {', '.join(qs)}" if isinstance(qs, dict) and qs else ""))

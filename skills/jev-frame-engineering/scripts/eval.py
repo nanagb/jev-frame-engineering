@@ -63,9 +63,12 @@ def main():
         ap.error("--repeat and --batch-size must be positive")
     if a.permute_options and a.batch_template:
         ap.error("--permute-options works in single mode (--questions)")
+    if a.json and (os.path.isdir(a.json) or not os.path.isdir(os.path.dirname(os.path.abspath(a.json)))):
+        # checked before the first billed request: the answers are written only after the whole run
+        ap.error(f"--json {a.json}: give a file in an existing directory")
     dump = {}
     try:
-        policy = J.load_json(a.policy) if a.policy else {}
+        policy = J.load_policy(a.policy)
         qset = J.load_json(a.batch_template) if a.batch_template else J.load_json(a.questions)
         if a.batch_template:
             J.check_template(qset)
@@ -92,8 +95,11 @@ def main():
     except J.JevError as e:
         print(f"error: {J.redact(str(e))}", file=sys.stderr); sys.exit(2)
     if a.json:
-        with open(a.json, "w") as f:
-            json.dump(dump, f, indent=1)
+        try:
+            with open(a.json, "w") as f:
+                json.dump(dump, f, indent=1)
+        except OSError as e:
+            print(f"error: cannot write {a.json}: {e.strerror}", file=sys.stderr); sys.exit(2)
         print(f"raw answers written to {a.json}")
 
 

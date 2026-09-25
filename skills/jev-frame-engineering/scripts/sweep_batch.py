@@ -84,7 +84,7 @@ def main():
     if not sizes or any(n < 1 for n in sizes):
         ap.error("--sizes must contain positive integers")
     try:
-        tpl = J.load_json(a.batch_template); policy = J.load_json(a.policy) if a.policy else {}
+        tpl = J.load_json(a.batch_template); policy = J.load_policy(a.policy)
         J.check_template(tpl)
         # every file is concatenated into one sweep, after the template and every label are checked
         items = [it for _, loaded in J.load_labelled(a.items, tpl) for it in loaded]

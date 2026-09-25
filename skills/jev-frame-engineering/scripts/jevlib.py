@@ -191,6 +191,29 @@ def questions_of(qset):
     return qset["questions"] if "questions" in qset else qset
 
 
+def load_policy(path):
+    """policy.json, checked before any request, or {} without a path: an object of question id to
+    {"threshold": a number from 0 to 1, "parents": {option: parent label}}, both keys optional. A policy of
+    another shape used to raise AttributeError in the middle of a billed run."""
+    if not path:
+        return {}
+    policy = load_json(path)
+    if not isinstance(policy, dict):
+        raise JevError(f"{path}: a policy is an object of question id to settings, not {_kind(policy)}")
+    bad = []
+    for qid, p in policy.items():
+        if not isinstance(p, dict):
+            bad.append(f"{qid} is {_kind(p)}, not an object"); continue
+        if "threshold" in p and not _number(p["threshold"]):
+            bad.append(f"{qid}.threshold is {_label(p['threshold'])}, not a number from 0 to 1")
+        parents = p.get("parents")
+        if parents is not None and not (isinstance(parents, dict) and all(isinstance(v, str) for v in parents.values())):
+            bad.append(f"{qid}.parents is not an object of option name to parent label")
+    if bad:
+        raise JevError(f"{path}: " + "; ".join(bad))
+    return policy
+
+
 def check_template(template):
     """Refuse a batch template run_batched cannot use, before any request: a plain question set passed as one
     would otherwise pass the label check and end in a KeyError traceback."""
