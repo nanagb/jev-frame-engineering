@@ -141,6 +141,14 @@ or [live docs](https://docs.typesafe.ai/introduction) for the programming model 
 `scripts/` uses Python 3 with no dependencies: `eval.py`, `ablate.py`, `sweep_batch.py`,
 `token_probe.py`, and the shared `jevlib.py`.
 
+Reviewed against the live docs on **2026-10-15**: the skill now covers published confidence
+formulas, Jev 1.14 preview, and opt-in context/vision guidance. See
+[current API guidance](skills/jev-frame-engineering/references/current-api.md) for sources and
+experimental-feature limits. The helpers evaluate text Choice/Noul/Score requests and remain
+pinned to `jev-1.13.0`; use `--model jev-1.14.0` for a separate evaluation. Images, Box, and
+long-context headers require the official SDK/API. The September fixture results below have
+not been remeasured on 1.14.
+
 ### Install
 
 In Claude Code, add this repository as a plugin marketplace and install the plugin:

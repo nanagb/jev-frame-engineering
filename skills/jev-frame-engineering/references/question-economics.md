@@ -2,8 +2,8 @@
 
 ## Billing and measurement
 
-The [Models page](https://docs.typesafe.ai/models) lists `jev-1.13.0` at $0.042 per million input
-tokens, with free output tokens (reviewed 2026-09-20). Check current pricing before budgeting;
+The [Models page](https://docs.typesafe.ai/models) lists `jev-1.13.0` and `jev-1.14.0` at $0.042
+per million input tokens, with free output tokens (reviewed 2026-10-15). Check current pricing before budgeting;
 the helper's dollar estimate applies only to a known resolved model and excludes usage missing
 from failed or retried calls.
 

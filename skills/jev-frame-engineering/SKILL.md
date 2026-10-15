@@ -7,7 +7,7 @@ description: >
   and supporting production behavior. Use TypeSafe's official typesafe-ai skill or
   live documentation for the programming model and initial integration.
 metadata:
-  version: 0.9.4
+  version: 0.9.5
 ---
 
 # Frame Engineering for Jev
@@ -25,6 +25,14 @@ The practices below cover frame design and evaluation, with supporting integrati
 retries, caching, and deployment. Treat the live TypeSafe docs as the API reference and proposed
 optimizations as hypotheses to test on the application's data. The scripts are evaluation helpers,
 not a production SDK or proof of model performance.
+
+Before changing a frame, check the [live documentation index](https://docs.typesafe.ai/llms.txt)
+and the relevant model, primitive, and SDK pages. Read [current API guidance](references/current-api.md)
+when selecting a model or using images, Box, or long context. Reviewed 2026-10-15: `jev-latest`
+still resolves to `jev-1.13.0`; `jev-preview` resolves to `jev-1.14.0`. The helpers and examples
+stay pinned to 1.13 for reproducibility; use `--model jev-1.14.0` for a separate comparison.
+Images and Box are experimental; these text-evaluation helpers do not support them or the
+long-context header. Use the current official SDK/API for those workflows.
 
 Where a rule below cites a measurement, it was taken on a synthetic support-triage fixture of
 50 labelled tickets against `jev-1.13.0` on 2026-09-20 with three repeats per condition. The
@@ -64,7 +72,8 @@ See [evaluation protocol](references/eval-protocol.md) for formats, metrics, and
   on the same side as its source: on the fixture a paraphrase pulled as hard as the literal string.
 - Add `other`/`none` when a Choice's options may not cover the input. Noul criteria are optional;
   explicit `true` and `false` descriptions can clarify boundaries. Add a presence Noul only when
-  that is a useful separate judgment.
+  that is a useful separate judgment. Choice accepts up to 255 options. Describe at least two
+  distinct Score levels on one dimension; the API accepts up to 10 levels.
 - Put needed policies, rosters, relationships, and current facts in state. Keep exact counts,
   arithmetic, date comparisons, and lookups in code. Question IDs are not visible to the model;
   include the item's reference and the full question in `instructions`.
@@ -100,8 +109,8 @@ neighbour's label.
 - Questions are independent against one shared state. Question count is not an accuracy axis
   (16, 48 and 240 questions over the same 16-item state scored the same in every repeat), but
   adding items changes the state, and a growing state is not accuracy-neutral.
-- Check both current context limits and actual token use. For `jev-1.13.0`, the docs currently
-  specify 64k tokens overall and 32k for state plus the longest question; recheck before deployment.
+- Check both context limits and actual token use; fitting a request does not establish accuracy.
+  See [batching](references/batching.md) for default and opt-in long-context budgets.
 
 See [batching](references/batching.md); use `sweep_batch.py` for a diagnostic sweep.
 
@@ -157,13 +166,13 @@ two applicable options on 36%, and on deliberately mixed tickets Choice kept a s
 The distribution carries some ambiguity, less than the Nouls; read "does X apply" off a Noul.
 A Noul near 0.5 means comparable probability for yes and no, not medium intensity.
 
-Choice/Score `confidence` summarizes distribution concentration. The public docs give no
-contractual formula, only the demo's `(K·p_max − 1)/(K − 1)`. That expression reproduced every
-Choice confidence on the fixture within 0.02 (522 answers, 2 to 8 options) and does not reproduce
-Score confidence (errors to 0.2; a Score's value is the probability-weighted mean of its levels),
-so consume the returned field rather than deriving it. It is neither a universal probability of
-correctness nor permission to act. Re-evaluate calibration when questions, options, model, or
-traffic change.
+Choice/Score `confidence` summarizes distribution concentration. The docs now publish exact,
+different formulas: Choice uses `(K·p_max − 1)/(K − 1)`; Score uses probability-weighted distance
+from its most likely level, normalized against a uniform distribution. A Score's value is still
+the probability-weighted mean of its levels. Consume returned confidence for ordinary gating;
+see [evaluation protocol](references/eval-protocol.md#5-choose-and-validate-thresholds)
+for the formulas. Confidence is neither a universal probability of correctness nor permission
+to act. Re-evaluate calibration when questions, options, model, or traffic change.
 
 Under a simple cost model with perfect review, zero cost for a correct automatic action,
 constant error cost `C_wrong > 0`, and review cost `C_review`, automatic action breaks even at
@@ -227,8 +236,9 @@ model versions, sample counts, and date. Keep observations scoped to those runs.
 - [Official typesafe-ai skill](https://github.com/typesafe-ai/skills/blob/main/skills/typesafe-ai/SKILL.md): programming model and live-docs workflow.
 - [HTTP API](https://docs.typesafe.ai/api): request/response shapes and documented error statuses.
 - [Choice](https://docs.typesafe.ai/primitives/choice), [Noul](https://docs.typesafe.ai/primitives/noul), [Score](https://docs.typesafe.ai/primitives/score): primitive semantics and question design.
-- [Confidence](https://docs.typesafe.ai/confidence): uncertainty signal and action-specific thresholds.
+- [Confidence](https://docs.typesafe.ai/confidence): exact Choice/Score confidence formulas and action-specific thresholds.
 - [State](https://docs.typesafe.ai/concepts/state): structured context and separation of content from questions.
 - [Models](https://docs.typesafe.ai/models): current IDs, aliases, limits, and pricing.
+- [Images](https://docs.typesafe.ai/images) and [Box](https://docs.typesafe.ai/primitives/box): experimental visual inputs and localization; see [current API guidance](references/current-api.md) for helper limitations.
 - [Speculative fan-out](https://docs.typesafe.ai/patterns/fan-out): independent questions evaluated together.
 - [Jev 1.13 jaggedness](https://docs.typesafe.ai/model-jaggedness/jev-1.13): documented model limitations, including adversarial steering.

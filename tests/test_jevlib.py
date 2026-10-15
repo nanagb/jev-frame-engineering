@@ -313,6 +313,22 @@ class ReportingBehavior(unittest.TestCase):
         self.assertIsNone(report["usd_per_1000_items"])
         self.assertAlmostEqual(J.score(self.rows(), QUESTIONS)["usd_per_1000_items"], 0.0042)
 
+    def test_jev_114_evaluation_prices_the_resolved_model(self):
+        item = {"id": "t1", "state": "hello", "expected": {"flag": True}}
+        for selected in ("jev-1.14.0", "jev-preview"):
+            with self.subTest(selected=selected), patch.object(J.urllib.request, "urlopen",
+                    return_value=wire(response(model="jev-1.14.0"))) as call:
+                rows = J.run_single([item], {"model": selected, "questions": QUESTIONS}, key=KEY, sleep=0)
+                self.assertEqual(json.loads(call.call_args.args[0].data)["model"], selected)
+                report = J.score(rows, QUESTIONS)
+                self.assertEqual(report["model"], "jev-1.14.0")
+                self.assertEqual(report["questions"]["flag"]["n"], 1)
+                self.assertAlmostEqual(report["usd_per_1000_items"], 0.0042)
+        for unpriced in ("jev-preview", "jev-latest", "jev-1.14.1"):
+            with self.subTest(unpriced=unpriced):
+                self.assertIsNone(J.score(self.rows(unpriced), QUESTIONS)["usd_per_1000_items"])
+        self.assertEqual(J.DEFAULT_MODEL, "jev-1.13.0")
+
     def test_mixed_models_and_failed_requests_are_visible(self):
         rows = self.rows() + self.rows("future-model") + [{"answers": None, "requests": 1}]
         report = J.score(rows, QUESTIONS)

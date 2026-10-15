@@ -10,8 +10,8 @@ from email.utils import parsedate_to_datetime
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-1.13.0"          # pinned; aliases (jev-latest) move between releases
-PRICE_PER_MTOK = 0.042                # jev-1.13.0, checked 2026-09-20; output free
-PRICES_PER_MTOK = {DEFAULT_MODEL: PRICE_PER_MTOK}
+PRICE_PER_MTOK = 0.042                # Jev 1.13/1.14, checked 2026-10-15; output free
+PRICES_PER_MTOK = {DEFAULT_MODEL: PRICE_PER_MTOK, "jev-1.14.0": PRICE_PER_MTOK}
 BUCKETS = [0.9, 0.75, 0.6, 0.0]
 THRESHOLDS = {"choice": 0.75, "noul": 0.8}   # policy defaults when a question has no "threshold"
 

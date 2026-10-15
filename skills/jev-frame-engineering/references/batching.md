@@ -71,8 +71,12 @@ Moving repeated criteria into shared state can reduce input tokens. It changes t
 indirection and must be evaluated against the inline version. Do not assume bare `null` criteria
 will retrieve a definition unless the instructions clearly connect the option to that context.
 
-Check [Models](https://docs.typesafe.ai/models) for current budgets. As of the review,
-`jev-1.13.0` allows 64k tokens for the complete request and 32k for state plus the longest
-question. A batch may fit one limit and exceed the other. Check usage rather than estimating
-exact token counts from character counts. Request latency divided by batch size is amortized
-service time per item; each item still waits for the complete request.
+Check [Models](https://docs.typesafe.ai/models) for current budgets. Reviewed 2026-10-15:
+Jev 1.13 and 1.14 default to 64k tokens per complete request and 32k for state plus any one
+question. There is no separate question-count limit. The opt-in
+`TypeSafe-Danger-Zone-Long-Context: true` header raises both budgets to 262k; TypeSafe warns
+that this is slower and less accurate. The helpers do not send that header. Compare filtered
+state or smaller batches before expanding context, and measure accuracy in the chosen mode.
+A batch may fit one budget and exceed the other. Use reported token usage. Request latency
+divided by batch size is amortized service time per item; each item still waits for the complete
+request. See [current API guidance](current-api.md) for experimental image/Box workflows.
