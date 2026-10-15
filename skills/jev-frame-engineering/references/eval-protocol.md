@@ -127,9 +127,21 @@ single overall threshold is insufficient evidence for action-specific error cost
 tuning data and validate once on untouched data. If evidence is insufficient, gather more or
 retain review. No fixed minimum bucket count proves a target precision.
 
-Consume returned `confidence`; the [confidence docs](https://docs.typesafe.ai/confidence) do not
-publish an exact formula. Options and request changes can affect the output. Measure calibration
-and operating precision on representative traffic, including class prevalence.
+Consume returned `confidence` for ordinary gating. The [confidence docs](https://docs.typesafe.ai/confidence)
+now publish these exact formulas (reviewed 2026-10-15):
+
+- Choice, with `K > 1` options: `(K * max(p) - 1) / (K - 1)`.
+- Score, with `K` ordered levels indexed `0..K-1` and most likely level `m`:
+  `max(0, 1 - sum(p[i] * abs(i - m)) / U)`, where
+  `U = sum(abs(i - (K - 1) / 2) for i in range(K)) / K`.
+- Noul returns no confidence field. An optional derived `abs(2 * p - 1)` measures certainty
+  in either direction; a high value can mean confidently **no**, so it is not a yes threshold.
+
+For three Score levels, `(0, 0.5, 0.5)` gives confidence `0.25`, while `(0.5, 0, 0.5)` gives
+`0`: distant alternatives carry more spread. Score value remains `sum(i * p[i])`.
+These statistics do not establish correctness. Options and request changes can affect the
+output. Measure calibration and operating precision on representative traffic, including class
+prevalence; do not substitute the Choice formula for Score or Box confidence.
 
 ## 6. Re-evaluate when inputs change
 

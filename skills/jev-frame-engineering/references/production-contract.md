@@ -2,21 +2,28 @@
 
 ## Errors are not uncertainty
 
-The [HTTP API](https://docs.typesafe.ai/api) documents 401 (credentials), 422 (body validation),
-429 (rate limit), and 529 (overload). The helper also handles ordinary HTTP/transport failures.
+The [HTTP API](https://docs.typesafe.ai/api) documents 400 (request rules or context overflow),
+401 (credentials), 413 (size), 415 (encoding), 422 (body validation), 429 (rate limit), and 529
+(overload). The helper also handles ordinary HTTP/transport failures.
+
+Request rules include a 32 MiB body limit, UTF-8 JSON without BOM, finite numbers, and at most
+64 nested object/array levels in state, instructions, and criteria. Use strings for exact large
+identifiers. Compression does not raise the body limit. See [current API guidance](current-api.md)
+for model and experimental-feature selection; the helper is not a complete API validator.
 
 | condition | helper behavior |
 |---|---|
-| non-transient HTTP status, including 400/401/403/404/422 | `JevError`, no retry; fix request/configuration |
+| non-transient HTTP status, including 400/401/403/404/413/415/422 | `JevError`, no retry; fix request/configuration |
 | 408, 429, 5xx including 529 | bounded retries with exponential backoff and `Retry-After` |
 | transport error or timeout | bounded retries, then `JevNoJudgment` |
-| invalid JSON or response missing usable answers | `JevNoJudgment`; do not manufacture a label |
+| invalid JSON or response missing usable answers | one resend within retry/wait budgets, then `JevNoJudgment` if still unusable |
 
 `JevNoJudgment` is a subclass of `JevError`; catch it first if handling them separately. The
 runners preserve it as an unanswered item, while non-retryable errors stop the run. Transient
 failures do occur: in about 1,200 requests on 2026-09-20, seven ended in a dropped connection or
-a 200 body that failed validation, and every one succeeded when resent. The helper retries the
-first kind and not the second, so plan a resend for unanswered items. A failure
+a 200 body that failed validation, and every one succeeded when resent. The helper retries
+transport failures and resends an invalid 200 body once within its retry budget. This observation
+does not guarantee recovery; plan later rescheduling for unanswered items. A failure
 has no uncertainty score. Use an explicit failure/review state distinguishable from a real
 `false`, `other`, or low-confidence answer.
 
